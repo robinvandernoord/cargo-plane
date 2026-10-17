@@ -85,7 +85,7 @@ impl Config {
             };
             bail!(
                 "remote `{name}` is not configured ({known}); add it to `{PROJECT_FILE}` or \
-                 ~/.config/cargo-plane/config.toml, or create one with `cargo plane setup fly`"
+                 ~/.config/cargo-plane/config.toml, or create one with `cargo plane setup fly` or `setup codespace`"
             );
         };
         let provider = match table.get("provider") {

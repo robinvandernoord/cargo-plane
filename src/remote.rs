@@ -203,9 +203,13 @@ impl Conn {
         &self.endpoint.env
     }
 
+    pub fn prelude(&self) -> Option<&str> {
+        self.endpoint.prelude.as_deref()
+    }
+
     /// `ssh` running a POSIX shell command with the remote's environment set up.
     pub fn shell(&self, command: &str) -> Result<Command> {
-        let script = format!("{}{command}", env_prelude(self.env())?);
+        let script = format!("{}{command}", env_prelude(self.prelude(), self.env())?);
         let mut cmd = self.ssh();
         cmd.arg(format!("sh -c {}", util::shell_quote(&script)));
         Ok(cmd)
@@ -290,11 +294,16 @@ impl Conn {
     }
 }
 
-/// Shell lines making rustup's toolchain available and exporting `env`.
-pub fn env_prelude(env: &BTreeMap<String, String>) -> Result<String> {
+/// Shell lines running the provider's `prelude`, making rustup's toolchain
+/// available and exporting `env`.
+pub fn env_prelude(prelude: Option<&str>, env: &BTreeMap<String, String>) -> Result<String> {
+    let mut script = prelude.unwrap_or_default().to_owned();
+    if !script.is_empty() && !script.ends_with('\n') {
+        script.push('\n');
+    }
     // `.` on a missing file makes dash exit, so check first: the Fly image
     // has no ~/.cargo/env (its toolchain comes from PATH).
-    let mut script = String::from("[ -f \"$HOME/.cargo/env\" ] && . \"$HOME/.cargo/env\"\n");
+    script += "[ -f \"$HOME/.cargo/env\" ] && . \"$HOME/.cargo/env\"\n";
     for (key, value) in env {
         let valid = key
             .chars()

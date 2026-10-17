@@ -27,7 +27,7 @@ Cargo, but in the cloud(s): run cargo on a remote machine.
 
 Usage: cargo plane [--remote <name>] <cargo command> [args...]
        cargo plane takeoff | land | status | purge [<remote>]
-       cargo plane [--remote <name>] setup fly [--help]
+       cargo plane [--remote <name>] setup fly | codespace [--help]
 
 Any cargo command works and runs remotely, with these differences:
   build              also copies binaries and cdylibs/staticlibs back
@@ -35,7 +35,8 @@ Any cargo command works and runs remotely, with these differences:
   test --local-run   builds tests remotely, runs them locally
 
 Setup:
-  setup fly   install flyctl, log in and create a Fly.io build machine
+  setup fly         install flyctl, log in and create a Fly.io build machine
+  setup codespace   create a GitHub Codespace (or pick one) to build on
 
 Lifecycle:
   takeoff   start the remote and connect
@@ -102,8 +103,12 @@ fn run() -> Result<ExitCode> {
                 provider::setup_fly(remote_name.as_deref(), &args[2..])?;
                 Ok(ExitCode::SUCCESS)
             }
-            Some(other) => bail!("no setup for `{other}` (available: fly)"),
-            None => bail!("usage: cargo plane setup <provider> (available: fly)"),
+            Some("codespace") => {
+                provider::setup_codespace(remote_name.as_deref(), &args[2..])?;
+                Ok(ExitCode::SUCCESS)
+            }
+            Some(other) => bail!("no setup for `{other}` (available: fly, codespace)"),
+            None => bail!("usage: cargo plane setup <provider> (available: fly, codespace)"),
         };
     }
 

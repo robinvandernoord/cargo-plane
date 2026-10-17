@@ -4,8 +4,9 @@ Cargo, but in the cloud(s). ✈️
 
 `cargo plane <command>` syncs your workspace to a remote machine, runs cargo
 there and streams the output back, so a weak laptop doesn't have to do the
-compiling. Providers handle the remote's lifecycle: a plain SSH host, or a
-Fly.io Machine that starts on demand and stops itself when idle.
+compiling. Providers handle the remote's lifecycle: a plain SSH host, a
+Fly.io Machine that starts on demand and stops itself when idle, or a GitHub
+Codespace.
 
 ```sh
 cargo plane check
@@ -56,6 +57,45 @@ throwaway build machine for that project that stops itself when idle, and adds
 it to the project's `.cargo/plane.toml`. `cargo plane purge fly` deletes it. See
 [`contrib/fly`](contrib/fly/README.md).
 
+### GitHub Codespaces
+
+```sh
+cargo plane setup codespace
+```
+
+Run it inside a project with the [GitHub CLI](https://cli.github.com) installed.
+It logs you in with the `codespace` scope if needed, creates a codespace from
+the project's repository (or lets you pick an existing one), asks for a machine
+type and idle timeout, and adds it to `.cargo/plane.toml`:
+
+```toml
+[remotes.codespace]
+provider = "codespace"
+codespace = "fluffy-space-waffle-q7xj9"   # from `gh codespace list`
+# gh = "/path/to/gh"                       # default: gh on PATH
+```
+
+Then it installs rsync, a C compiler and rustup on the codespace if they're
+missing, after asking. A Rust toolchain from the repository's dev container
+(the `rust` feature or the `devcontainers/rust` image) is used as is. One that
+setup installed lives in the codespace's home directory, which a rebuild of the
+codespace wipes, so add the feature to `.devcontainer/devcontainer.json` if you
+rebuild often:
+
+```json
+"features": { "ghcr.io/devcontainers/features/rust:1": {} }
+```
+
+SSH goes through `gh codespace ssh`, which starts a stopped codespace on demand;
+the codespace needs an SSH server, which GitHub's default image has.
+Builds live in `/workspaces/.cargo-plane`, which survives stops and rebuilds.
+GitHub stops the codespace after its idle timeout and bills it per core-hour
+while it runs, plus storage; personal accounts get a monthly allowance of both
+for free. GitHub decides what counts as idle, so keep the timeout longer than
+your slowest build. Stopped codespaces are deleted after their retention
+period (30 days by default); run setup again to get a new one.
+`cargo plane purge codespace` deletes it right away.
+
 ## Commands
 
 Every cargo command runs remotely as-is, except:
@@ -67,6 +107,7 @@ Every cargo command runs remotely as-is, except:
 | `test --local-run`          | Builds tests remotely, runs them locally (e.g. hardware tests)   |
 | `takeoff` / `land`          | Start / stop the remote                                          |
 | `setup fly`                 | Create a Fly.io build machine and configure it as a remote       |
+| `setup codespace`           | Create or pick a GitHub Codespace and configure it as a remote   |
 | `purge`                     | Permanently delete what `setup` created (asks you to type the name) |
 | `status`                    | Show the remote's state                                          |
 
