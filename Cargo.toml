@@ -1,0 +1,11 @@
+[package]
+name = "cargo-plane"
+version = "0.0.0"
+edition = "2024"
+description = "Cargo, but in the cloud(s): offload cargo builds to remote machines (work in progress)"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+keywords = ["cargo", "remote", "build", "cloud", "subcommand"]
+categories = ["development-tools::cargo-plugins"]
+
+[dependencies]
