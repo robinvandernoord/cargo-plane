@@ -1,11 +1,16 @@
 [package]
 name = "cargo-plane"
-version = "0.0.0"
+version = "0.1.0"
 edition = "2024"
-description = "Cargo, but in the cloud(s): offload cargo builds to remote machines (work in progress)"
-license = "MIT OR Apache-2.0"
+description = "Cargo, but in the cloud(s): run cargo on a remote machine with pluggable providers (SSH, Fly.io, ...)"
+license = "MIT"
 readme = "README.md"
 keywords = ["cargo", "remote", "build", "cloud", "subcommand"]
 categories = ["development-tools::cargo-plugins"]
 
 [dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+terminal_size = "0.4"
+toml = "0.9"

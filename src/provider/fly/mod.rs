@@ -1,0 +1,266 @@
+//! A Fly.io Machine with a volume for `target/` and the cargo registry.
+//! Started on demand; it stops itself when idle (see `contrib/fly`).
+//! `cargo plane setup fly` creates everything.
+//!
+//! Unless `ssh_host` is set (e.g. via WireGuard: `<machine>.vm.<app>.internal`),
+//! SSH goes through a background `fly proxy` on `127.0.0.1:<proxy_port>`.
+
+mod flyctl;
+mod setup;
+
+use std::fs;
+use std::net::{SocketAddr, TcpStream};
+use std::os::unix::process::CommandExt;
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
+use std::thread::sleep;
+use std::time::{Duration, Instant};
+
+use anyhow::{Context, Result, bail};
+use serde::Deserialize;
+
+use self::flyctl::{Flyctl, Machine};
+use super::{Endpoint, Provider};
+use crate::{ui, util};
+
+pub use setup::setup;
+
+#[derive(Deserialize)]
+pub struct Config {
+    app: String,
+    /// Machine ID; by default the machine `setup` tagged as builder.
+    machine: Option<String>,
+    proxy_port: Option<u16>,
+    ssh_host: Option<String>,
+    #[serde(default = "default_user")]
+    user: String,
+    /// Path to flyctl; found automatically when unset.
+    flyctl: Option<String>,
+}
+
+fn default_user() -> String {
+    "root".into()
+}
+
+/// Paths used by the image in `contrib/fly`.
+const DATA_DIR: &str = "/data";
+/// Our sshd's port; Fly's own SSH server (for `fly ssh console`) has 22.
+const SSH_PORT: u16 = 2222;
+
+pub struct Fly(Config);
+
+impl Fly {
+    pub fn new(config: Config) -> Self {
+        Self(config)
+    }
+
+    fn flyctl(&self) -> Result<Flyctl> {
+        Flyctl::require(self.0.flyctl.as_deref())
+    }
+
+    fn machine(&self, fly: &Flyctl) -> Result<Machine> {
+        fly.builder(&self.0.app, self.0.machine.as_deref())?
+            .with_context(|| {
+                format!(
+                    "no cargo-plane machine found in Fly app `{}`; run `cargo plane setup fly`",
+                    self.0.app
+                )
+            })
+    }
+
+    /// Stable per app, so several Fly remotes don't fight over one port.
+    fn proxy_addr(&self) -> SocketAddr {
+        let port = self
+            .0
+            .proxy_port
+            .unwrap_or(20000 + (util::fnv1a(self.0.app.as_bytes()) % 10000) as u16);
+        SocketAddr::from(([127, 0, 0, 1], port))
+    }
+
+    fn proxy_is_up(&self) -> bool {
+        TcpStream::connect_timeout(&self.proxy_addr(), Duration::from_millis(300)).is_ok()
+    }
+
+    fn pid_file(&self) -> Result<PathBuf> {
+        Ok(util::cache_dir()?.join(format!("fly-proxy-{}.pid", self.0.app)))
+    }
+
+    fn ensure_proxy(&self, fly: &Flyctl, machine: &Machine) -> Result<()> {
+        if self.proxy_is_up() {
+            return Ok(());
+        }
+        let dir = util::cache_dir()?;
+        fs::create_dir_all(&dir)?;
+        let log_path = dir.join(format!("fly-proxy-{}.log", self.0.app));
+        let log = fs::File::create(&log_path)?;
+        let ports = format!("{}:{SSH_PORT}", self.proxy_addr().port());
+        let target = format!("{}.vm.{}.internal", machine.id, self.0.app);
+        let child = fly
+            .command(&["proxy", &ports, &target, "--app", &self.0.app])
+            .stdin(Stdio::null())
+            .stdout(log.try_clone()?)
+            .stderr(log)
+            // Own process group, so Ctrl-C in the terminal doesn't kill it.
+            .process_group(0)
+            .spawn()
+            .context("starting `flyctl proxy`")?;
+        fs::write(self.pid_file()?, child.id().to_string())?;
+
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !self.proxy_is_up() {
+            if Instant::now() > deadline {
+                bail!(
+                    "`flyctl proxy` did not come up on {} (see {})",
+                    self.proxy_addr(),
+                    log_path.display()
+                );
+            }
+            sleep(Duration::from_millis(250));
+        }
+        Ok(())
+    }
+
+    fn stop_proxy(&self) -> Result<()> {
+        let pid_file = self.pid_file()?;
+        if let Ok(pid) = fs::read_to_string(&pid_file) {
+            // The pid may be stale; failing to kill it is fine.
+            let _ = Command::new("kill")
+                .arg(pid.trim())
+                .stderr(Stdio::null())
+                .status();
+            let _ = fs::remove_file(pid_file);
+        }
+        Ok(())
+    }
+}
+
+impl Provider for Fly {
+    fn up(&self) -> Result<Endpoint> {
+        let fly = self.flyctl()?;
+        let mut machine = self.machine(&fly)?;
+        if machine.state != "started" {
+            ui::status(
+                "Starting",
+                format!("Fly machine {} ({})", machine.id, machine.state),
+            );
+            fly.output(&["machine", "start", &machine.id, "--app", &self.0.app])?;
+            let deadline = Instant::now() + Duration::from_secs(60);
+            while machine.state != "started" {
+                if Instant::now() > deadline {
+                    bail!("Fly machine {} did not start within 60s", machine.id);
+                }
+                sleep(Duration::from_secs(1));
+                machine = self.machine(&fly)?;
+            }
+        }
+
+        let mut ssh_options = Vec::new();
+        let (host, port) = match &self.0.ssh_host {
+            Some(host) => (host.clone(), SSH_PORT),
+            None => {
+                self.ensure_proxy(&fly, &machine)?;
+                // All proxied machines share 127.0.0.1; keep their host keys apart.
+                ssh_options.extend([
+                    "-o".into(),
+                    format!("HostKeyAlias=cargo-plane-fly-{}", self.0.app),
+                    "-o".into(),
+                    "StrictHostKeyChecking=accept-new".into(),
+                ]);
+                ("127.0.0.1".into(), self.proxy_addr().port())
+            }
+        };
+
+        Ok(Endpoint {
+            host,
+            user: Some(self.0.user.clone()),
+            port: Some(port),
+            ssh_options,
+            remote_dir: Some(format!("{DATA_DIR}/cargo-plane")),
+            // sshd doesn't pass the image's ENV on, so set the toolchain up here.
+            env: [
+                ("CARGO_HOME", format!("{DATA_DIR}/cargo")),
+                ("RUSTUP_HOME", format!("{DATA_DIR}/rustup")),
+                (
+                    "PATH",
+                    "/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+                        .into(),
+                ),
+            ]
+            .into_iter()
+            .map(|(k, v)| (k.to_owned(), v))
+            .collect(),
+        })
+    }
+
+    fn down(&self) -> Result<()> {
+        self.stop_proxy()?;
+        let fly = self.flyctl()?;
+        let machine = self.machine(&fly)?;
+        if machine.state == "started" {
+            ui::status("Stopping", format!("Fly machine {}", machine.id));
+            fly.output(&["machine", "stop", &machine.id, "--app", &self.0.app])?;
+        }
+        Ok(())
+    }
+
+    fn status(&self) -> Result<String> {
+        let proxy = match (&self.0.ssh_host, self.proxy_is_up()) {
+            (Some(host), _) => format!("direct SSH to {host}"),
+            (None, true) => format!("proxy on {}", self.proxy_addr()),
+            (None, false) => "proxy not running".into(),
+        };
+        let machine = self.machine(&self.flyctl()?)?;
+        Ok(format!(
+            "Fly machine {} in app {} ({}): {} ({proxy})",
+            machine.id, self.0.app, machine.region, machine.state
+        ))
+    }
+
+    fn purge(&self) -> Result<bool> {
+        if !ui::interactive() {
+            bail!("`cargo plane purge` asks for confirmation; run it in a terminal");
+        }
+        let fly = self.flyctl()?;
+        let app = &self.0.app;
+        if !fly.app_exists(app) {
+            ui::status("Gone", format!("Fly app `{app}` doesn't exist (anymore)"));
+            self.stop_proxy()?;
+            return Ok(true);
+        }
+        let machines = fly.machines(app)?;
+        let volumes: serde_json::Value = fly.json(&["volumes", "list", "--app", app, "--json"])?;
+
+        eprintln!("This permanently deletes the Fly.io app `{app}`, including:");
+        for machine in &machines {
+            eprintln!(
+                "  - machine {} ({}, {})",
+                machine.id, machine.region, machine.state
+            );
+        }
+        for volume in volumes.as_array().into_iter().flatten() {
+            let get = |key| {
+                volume
+                    .get(key)
+                    .map(|v| v.to_string().trim_matches('"').to_owned())
+            };
+            eprintln!(
+                "  - volume {} ({} GB) and everything on it",
+                get("name").unwrap_or_default(),
+                get("size_gb").unwrap_or_else(|| "?".into())
+            );
+        }
+        eprintln!("Builds start from scratch if you set it up again.");
+        if ui::ask("Type the app name to confirm", None)? != *app {
+            return Ok(false);
+        }
+
+        self.stop_proxy()?;
+        ui::status("Destroying", format!("Fly app {app}"));
+        fly.interactive(&["apps", "destroy", app, "--yes"])?;
+        Ok(true)
+    }
+
+    fn boot_timeout(&self) -> Duration {
+        Duration::from_secs(60)
+    }
+}
