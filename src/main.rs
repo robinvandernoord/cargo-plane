@@ -1,6 +1,8 @@
 mod artifacts;
 mod cargo_args;
 mod config;
+mod host;
+mod local;
 mod output;
 mod project;
 mod provider;
@@ -11,12 +13,14 @@ mod util;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, ExitCode};
+use std::time::SystemTime;
 
 use anyhow::{Context, Result, bail};
 
 use crate::artifacts::Artifact;
-use crate::cargo_args::{Invocation, Selector};
-use crate::config::Config;
+use crate::cargo_args::{Edits, Invocation, Selector};
+use crate::config::{Config, PROJECT_FILE};
+use crate::host::SetupHost;
 use crate::project::{Project, Stdout};
 use crate::remote::{Conn, Remote};
 
@@ -26,21 +30,33 @@ const USAGE: &str = "\
 Cargo, but in the cloud(s): run cargo on a remote machine.
 
 Usage: cargo plane [--remote <name>] <cargo command> [args...]
+       cargo plane [--remote <name>] exec <command> [args...]
+       cargo plane [--remote <name>] shell
        cargo plane takeoff | land | status | purge [<remote>]
-       cargo plane [--remote <name>] setup fly [--help]
+       cargo plane [--remote <name>] setup <provider> [--help]
 
 Any cargo command works and runs remotely, with these differences:
   build              also copies binaries and cdylibs/staticlibs back
   run                builds remotely, runs the binary locally
   test --local-run   builds tests remotely, runs them locally
 
+With provider = \"local\", commands run directly on this machine.
+
 Setup:
-  setup fly   install flyctl, log in and create a Fly.io build machine
+  setup local       configure direct local execution
+  setup ssh         configure an existing SSH host
+  setup fly         install flyctl, log in and create a Fly.io build machine
+  setup codespace   create a GitHub Codespace (or pick one) to build on
+  setup <name>      set up a remote with the `cargo-plane-provider-<name>` plugin
 
 Lifecycle:
   takeoff   start the remote and connect
   land      disconnect and stop the remote
   status    show the remote's state
+
+Other commands, in the project's directory on the remote (synced first):
+  exec      run any command, e.g. `cargo plane exec rustup component add miri`
+  shell     open an interactive shell
   purge     permanently delete what `setup` created (asks first)
 
 Options:
@@ -98,12 +114,21 @@ fn run() -> Result<ExitCode> {
 
     if args[0] == "setup" {
         return match args.get(1).map(String::as_str) {
-            Some("fly") => {
-                provider::setup_fly(remote_name.as_deref(), &args[2..])?;
+            None => {
+                print!("{}", setup_usage());
+                Ok(ExitCode::FAILURE)
+            }
+            Some("-h" | "--help" | "help") => {
+                print!("{}", setup_usage());
                 Ok(ExitCode::SUCCESS)
             }
-            Some(other) => bail!("no setup for `{other}` (available: fly)"),
-            None => bail!("usage: cargo plane setup <provider> (available: fly)"),
+            Some(flag) if flag.starts_with('-') => {
+                bail!("unknown option `{flag}` for `setup`\n\n{}", setup_usage())
+            }
+            Some(provider) => {
+                setup(provider, remote_name.as_deref(), &args[2..])?;
+                Ok(ExitCode::SUCCESS)
+            }
         };
     }
 
@@ -126,7 +151,11 @@ fn run() -> Result<ExitCode> {
     }
 
     let config = Config::load(&std::env::current_dir()?)?;
-    let remote = Remote::new(config.select(remote_name.as_deref())?)?;
+    let selected = config.select(remote_name.as_deref())?;
+    if selected.provider == "local" {
+        return local::run(&selected, args);
+    }
+    let remote = Remote::new(selected)?;
 
     match args[0].as_str() {
         "takeoff" => {
@@ -157,19 +186,160 @@ fn run() -> Result<ExitCode> {
             println!("{}: {}", remote.name, remote.status()?);
             Ok(ExitCode::SUCCESS)
         }
+        "exec" => exec(&remote, &args[1..]),
+        "shell" => shell(&remote, &args[1..]),
         _ => cargo(&remote, args),
     }
 }
 
+fn setup_usage() -> String {
+    let mut usage = String::from(
+        "Usage: cargo plane [--remote <name>] setup <provider> [options]\n\n\
+         Configures a provider in the project's .cargo/plane.toml.\n\
+         `cargo plane setup <provider> --help` shows a provider's options.\n",
+    );
+    let builtins: Vec<_> = provider::builtin_setups().collect();
+    if !builtins.is_empty() {
+        usage += "\nBuilt in:\n";
+        for (name, creates) in builtins {
+            usage += &format!("  {name:<12} {creates}\n");
+        }
+    }
+    let plugins = provider::plugins();
+    if plugins.is_empty() {
+        usage += "\nNo other providers on PATH (plugins are named cargo-plane-provider-<name>)\n";
+    } else {
+        usage += "\nPlugins on PATH:\n";
+        for name in plugins {
+            usage += &format!("  {name}\n");
+        }
+    }
+    usage
+}
+
+/// `cargo plane setup <provider>`: the provider creates what it needs and
+/// saves the remote's config; then we check that cargo runs there.
+fn setup(provider_name: &str, remote_name: Option<&str>, args: &[String]) -> Result<()> {
+    let remote = remote_name.unwrap_or(provider_name);
+    let project_dir = project::workspace_root(None).ok();
+    let existing = match &project_dir {
+        Some(dir) => config::project_remote(&dir.join(PROJECT_FILE), remote)?,
+        None => None,
+    };
+    if let Some(table) = &existing {
+        let configured = table
+            .get("provider")
+            .and_then(toml::Value::as_str)
+            .unwrap_or(remote);
+        if configured != provider_name {
+            bail!(
+                "remote `{remote}` already uses provider `{configured}`; pick another name \
+                 with `cargo plane --remote <name> setup {provider_name}`"
+            );
+        }
+    }
+    let setup = cargo_plane_provider::Setup {
+        remote: remote.into(),
+        project_dir: project_dir.clone(),
+        config: existing.map(serde_json::to_value).transpose()?,
+        args: args.to_vec(),
+    };
+    let host = SetupHost::new(remote, provider_name, project_dir);
+    if provider_name == "local" {
+        local::setup(&setup, &host)?;
+    } else {
+        provider::lookup(provider_name)?.setup(&setup, &host)?;
+    }
+    host.finish()
+}
+
+/// The synced project around the current directory, if we're in one.
+fn synced_project(conn: &Conn) -> Result<Option<Project>> {
+    match Project::locate(&[], conn) {
+        Ok(project) => {
+            project.sync(conn)?;
+            Ok(Some(project))
+        }
+        // Outside a workspace there's nothing to sync; use the remote $HOME.
+        Err(_) => Ok(None),
+    }
+}
+
+/// `cargo plane exec <command>`: any command, in the project's directory.
+fn exec(remote: &Remote, args: &[String]) -> Result<ExitCode> {
+    let args = match args {
+        [dashes, rest @ ..] if dashes == "--" => rest,
+        args => args,
+    };
+    let [program, args @ ..] = args else {
+        bail!("usage: cargo plane exec <command> [args...]");
+    };
+    let conn = remote.connect()?;
+    match synced_project(&conn)? {
+        Some(project) => {
+            let outcome = project.run(&conn, program, args, Stdout::Passthrough)?;
+            Ok(exit_code(outcome.code))
+        }
+        None => {
+            let command = util::shell_join(std::iter::once(program).chain(args));
+            let status = conn.shell(&command)?.status()?;
+            Ok(exit_code(status.code().unwrap_or(1)))
+        }
+    }
+}
+
+/// `cargo plane shell`: an interactive shell in the project's directory.
+fn shell(remote: &Remote, args: &[String]) -> Result<ExitCode> {
+    if let Some(arg) = args.first() {
+        bail!("unexpected argument `{arg}`; to run a command, use `cargo plane exec`");
+    }
+    let conn = remote.connect()?;
+    let mut script = String::new();
+    if let Some(project) = synced_project(&conn)? {
+        script += &format!(
+            "cd {} || exit 1\n",
+            util::shell_quote(&project.remote_cwd())
+        );
+    }
+    script += "exec \"${SHELL:-/bin/sh}\"\n";
+    let status = conn.interactive(&script)?.status()?;
+    Ok(exit_code(status.code().unwrap_or(1)))
+}
+
 fn cargo(remote: &Remote, args: Vec<String>) -> Result<ExitCode> {
+    // Formatting is cheap, and done remotely the next sync would undo it.
+    if cargo_args::subcommand(&args) == Some("fmt") {
+        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+        let status = Command::new(cargo)
+            .args(&args)
+            .status()
+            .context("running cargo fmt")?;
+        return Ok(exit_code(status.code().unwrap_or(1)));
+    }
     ui::set_quiet(cargo_args::is_quiet(&args));
     let conn = remote.connect()?;
     let project = Project::locate(&args, &conn)?;
+    let edits = cargo_args::edits(&args);
+    let args = if edits == Edits::Sources {
+        project.check_vcs(&args)?;
+        if cargo_args::has_flag(&args, "--allow-no-vcs") {
+            args
+        } else {
+            cargo_args::insert_flag(&args, "--allow-no-vcs")
+        }
+    } else {
+        args
+    };
+    let synced_at = SystemTime::now();
     project.sync(&conn)?;
 
     match cargo_args::parse(args) {
         Invocation::Passthrough(args) => {
             let outcome = project.cargo(&conn, &args, Stdout::Passthrough)?;
+            if edits != Edits::No {
+                // Even after a failure: `cargo fix` may have fixed some files.
+                project.sync_back(&conn, synced_at)?;
+            }
             Ok(exit_code(outcome.code))
         }
         Invocation::Build(call) => {

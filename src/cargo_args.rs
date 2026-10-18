@@ -98,6 +98,45 @@ pub fn flag_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
     None
 }
 
+/// Whether a command changes files in the workspace, so its changes have to
+/// come back from the remote.
+#[derive(Debug, PartialEq)]
+pub enum Edits {
+    No,
+    /// `add`, `update`, ...: manifests and the lockfile.
+    Manifests,
+    /// `fix`, `clippy --fix`: sources; cargo checks version control first.
+    Sources,
+}
+
+pub fn edits(args: &[String]) -> Edits {
+    match subcommand(args) {
+        Some("fix") => Edits::Sources,
+        Some("clippy") if has_flag(args, "--fix") => Edits::Sources,
+        Some("add" | "remove" | "rm" | "update" | "generate-lockfile") => Edits::Manifests,
+        _ => Edits::No,
+    }
+}
+
+/// `args` with `flag` right after the subcommand, so before any `--`.
+pub fn insert_flag(args: &[String], flag: &str) -> Vec<String> {
+    let mut args = args.to_vec();
+    let at = subcommand_index(&args).map_or(args.len(), |i| i + 1);
+    args.insert(at, flag.into());
+    args
+}
+
+/// The cargo subcommand (`build`, `clippy`, ...), if any.
+pub fn subcommand(args: &[String]) -> Option<&str> {
+    subcommand_index(args).map(|i| args[i].as_str())
+}
+
+/// The toolchain picked with `+toolchain` before the subcommand, if any.
+pub fn toolchain(args: &[String]) -> Option<&str> {
+    let end = subcommand_index(args).unwrap_or(args.len());
+    args[..end].iter().find_map(|a| a.strip_prefix('+'))
+}
+
 fn subcommand_index(args: &[String]) -> Option<usize> {
     let mut i = 0;
     while i < args.len() {
@@ -152,6 +191,38 @@ fn cargo_call(global: &[String], sub: &str, rest: &[String], extra: &[&str]) -> 
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn knows_editing_commands() {
+        let args = |s: &str| s.split(' ').map(String::from).collect::<Vec<_>>();
+        assert_eq!(edits(&args("clippy --fix -- -D warnings")), Edits::Sources);
+        assert_eq!(edits(&args("clippy -- --fix")), Edits::No);
+        assert_eq!(edits(&args("fix --edition")), Edits::Sources);
+        assert_eq!(edits(&args("add serde")), Edits::Manifests);
+        assert_eq!(edits(&args("check")), Edits::No);
+        assert_eq!(
+            insert_flag(
+                &args("+nightly clippy --fix -- -D warnings"),
+                "--allow-no-vcs"
+            ),
+            args("+nightly clippy --allow-no-vcs --fix -- -D warnings")
+        );
+    }
+
+    #[test]
+    fn finds_subcommand_and_toolchain() {
+        let args = |s: &str| s.split(' ').map(String::from).collect::<Vec<_>>();
+        assert_eq!(
+            subcommand(&args("+nightly -v clippy --fix")),
+            Some("clippy")
+        );
+        assert_eq!(
+            toolchain(&args("+nightly -v clippy --fix")),
+            Some("nightly")
+        );
+        assert_eq!(toolchain(&args("build +x")), None);
+        assert_eq!(subcommand(&args("--color always fmt")), Some("fmt"));
+    }
     use super::*;
 
     fn s(args: &[&str]) -> Vec<String> {

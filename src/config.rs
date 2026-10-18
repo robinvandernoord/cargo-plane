@@ -68,7 +68,12 @@ impl Config {
             None if self.remotes.len() == 1 => self.remotes.keys().next().unwrap().clone(),
             None if self.remotes.is_empty() => bail!(
                 "no remotes configured\n\n\
-                 Add one to `{PROJECT_FILE}` or `~/.config/cargo-plane/config.toml`:\n\n  \
+                 Run `cargo plane setup <provider>` inside your Cargo project:\n\n  \
+                 cargo plane setup local       # build on this machine\n  \
+                 cargo plane setup ssh         # use an existing SSH host\n  \
+                 cargo plane setup fly         # create a Fly.io machine\n  \
+                 cargo plane setup codespace   # create or pick a GitHub Codespace\n\n\
+                 Or add one to `{PROJECT_FILE}` or `~/.config/cargo-plane/config.toml`:\n\n  \
                  [remotes.dev]\n  provider = \"ssh\"\n  host = \"my-build-box\"\n"
             ),
             None => bail!(
@@ -85,7 +90,8 @@ impl Config {
             };
             bail!(
                 "remote `{name}` is not configured ({known}); add it to `{PROJECT_FILE}` or \
-                 ~/.config/cargo-plane/config.toml, or create one with `cargo plane setup fly`"
+                 ~/.config/cargo-plane/config.toml, or run `cargo plane setup <provider>` \
+                 (local, ssh, fly or codespace); use `--remote {name}` before `setup` to name it"
             );
         };
         let provider = match table.get("provider") {
@@ -106,12 +112,69 @@ impl Config {
 }
 
 impl RemoteConfig {
-    /// Deserialize the provider-specific part of this remote's table.
-    pub fn provider_config<T: serde::de::DeserializeOwned>(&self) -> Result<T> {
-        Value::Table(self.table.clone())
-            .try_into()
+    /// This remote's table as JSON, the way providers get it.
+    pub fn json(&self) -> Result<serde_json::Value> {
+        serde_json::to_value(&self.table)
             .with_context(|| format!("invalid config for remote `{}`", self.name))
     }
+}
+
+/// `[remotes.<name>]` in a project's config file, if it's there.
+pub fn project_remote(path: &Path, name: &str) -> Result<Option<Table>> {
+    if !path.is_file() {
+        return Ok(None);
+    }
+    Ok(read(path)?
+        .get("remotes")
+        .and_then(|r| r.get(name))
+        .and_then(Value::as_table)
+        .cloned())
+}
+
+/// Replace (or add) `[remotes.<name>]` in a config file, keeping everything
+/// else, comments included.
+pub fn write_remote(path: &Path, name: &str, table: &Table) -> Result<()> {
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let section = section_text(name, table)?;
+    let updated = with_section(&text, name, &section);
+    if toml::from_str::<Table>(&updated).is_err() {
+        bail!(
+            "can't update remote `{name}` in {}; put this there yourself:\n\n{section}",
+            path.display()
+        );
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(path, updated).with_context(|| format!("writing {}", path.display()))
+}
+
+fn section_text(name: &str, table: &Table) -> Result<String> {
+    let mut remotes = Table::new();
+    remotes.insert(name.into(), Value::Table(table.clone()));
+    let mut doc = Table::new();
+    doc.insert("remotes".into(), Value::Table(remotes));
+    Ok(toml::to_string(&doc)?)
+}
+
+/// `text` with `[remotes.<name>]` replaced by `section` where it was, or
+/// with `section` appended.
+fn with_section(text: &str, name: &str, section: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    if let Some((start, end)) = section_range(&lines, name) {
+        let mut out: Vec<&str> = lines[..start].to_vec();
+        out.extend(section.lines());
+        out.extend(&lines[end..]);
+        return out.join("\n") + "\n";
+    }
+    let mut out = text.to_owned();
+    if !out.is_empty() {
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push('\n');
+    }
+    out + section
 }
 
 /// Remove `[remotes.<name>]` (and its subtables) from the project's
@@ -136,23 +199,29 @@ pub fn remove_remote(name: &str) -> Result<()> {
     Ok(())
 }
 
-fn remove_section(text: &str, name: &str) -> Option<String> {
+/// Lines `start..end` holding `[remotes.<name>]` and its subtables, without
+/// the blank lines after it.
+fn section_range(lines: &[&str], name: &str) -> Option<(usize, usize)> {
     let header = format!("[remotes.{name}]");
     let sub = format!("[remotes.{name}.");
-    let lines: Vec<&str> = text.lines().collect();
     let start = lines.iter().position(|l| l.trim() == header)?;
-    let end = lines[start + 1..]
+    let mut end = lines[start + 1..]
         .iter()
         .position(|l| {
             let l = l.trim_start();
             l.starts_with('[') && !l.starts_with(&sub)
         })
         .map_or(lines.len(), |i| start + 1 + i);
-    // Keep the blank lines before the next section; drop the one before ours instead.
-    let mut end = end;
     while end > start + 1 && lines[end - 1].trim().is_empty() {
         end -= 1;
     }
+    Some((start, end))
+}
+
+fn remove_section(text: &str, name: &str) -> Option<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let (start, end) = section_range(&lines, name)?;
+    // Keep the blank lines before the next section; drop the one before ours instead.
     let start = if start > 0 && lines[start - 1].trim().is_empty() {
         start - 1
     } else {
@@ -244,6 +313,33 @@ mod tests {
             ""
         );
         assert!(remove_section(text, "nope").is_none());
+    }
+
+    #[test]
+    fn writes_remote_sections() {
+        let mut table: Table = toml::from_str("provider = \"fly\"\napp = \"x\"").unwrap();
+        let section = section_text("fly", &table).unwrap();
+        assert_eq!(section, "[remotes.fly]\nprovider = \"fly\"\napp = \"x\"\n");
+
+        // Replaces only its own section and keeps comments elsewhere.
+        let text =
+            "# mine\nremote = \"a\"\n\n[remotes.fly]\napp = \"old\"\n\n[remotes.a]\nhost = \"z\"\n";
+        assert_eq!(
+            with_section(text, "fly", &section),
+            "# mine\nremote = \"a\"\n\n[remotes.fly]\nprovider = \"fly\"\napp = \"x\"\n\n[remotes.a]\nhost = \"z\"\n"
+        );
+        assert_eq!(with_section("", "fly", &section), section);
+        assert_eq!(
+            with_section("a = 1", "fly", &section),
+            format!("a = 1\n\n{section}")
+        );
+
+        table.insert(
+            "env".into(),
+            toml::from_str::<Table>("A = \"1\"").unwrap().into(),
+        );
+        let nested = section_text("fly", &table).unwrap();
+        assert!(nested.contains("[remotes.fly.env]"), "{nested}");
     }
 
     #[test]
