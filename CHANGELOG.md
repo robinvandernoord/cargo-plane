@@ -2,6 +2,14 @@
 
 <!-- next-version-placeholder -->
 
+## v0.2.1 (2026-10-18)
+
+### Feature
+* **setup:** support unattended provider configuration
+
+### Fix
+* bump internal dependency version to 0.2
+
 ## v0.1.2 (2026-10-18)
 
 ### Versioning
