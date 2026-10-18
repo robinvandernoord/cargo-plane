@@ -2,6 +2,13 @@
 
 <!-- next-version-placeholder -->
 
+## v0.1.2 (2026-10-18)
+
+
+
+### Versioning
+* make subcrates follow main version
+
 ## v0.1.1 (2026-10-18)
 
 ### Binaries
