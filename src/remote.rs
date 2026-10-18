@@ -12,15 +12,18 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::config::RemoteConfig;
-use crate::provider::{self, Endpoint, Provider};
+use crate::host::UiHost;
+use crate::provider::{self, AnyProvider, Endpoint};
 use crate::{ui, util};
 
 const DEFAULT_REMOTE_DIR: &str = ".cache/cargo-plane";
 
 pub struct Remote {
     pub name: String,
-    provider: Box<dyn Provider>,
+    provider: Box<dyn AnyProvider>,
     config: RemoteConfig,
+    /// The remote's table, as the provider gets it.
+    provider_config: serde_json::Value,
     state_file: PathBuf,
 }
 
@@ -41,7 +44,9 @@ pub struct Conn {
 
 impl Remote {
     pub fn new(config: RemoteConfig) -> Result<Self> {
-        let provider = provider::from_config(&config)?;
+        let provider = provider::lookup(&config.provider)
+            .with_context(|| format!("remote `{}`", config.name))?;
+        let provider_config = config.json()?;
         // Keyed by the config too, so editing a remote invalidates its cache.
         let key = util::fnv1a(toml::to_string(&config.table)?.as_bytes());
         let state_file = util::cache_dir()?
@@ -51,6 +56,7 @@ impl Remote {
             name: config.name.clone(),
             provider,
             config,
+            provider_config,
             state_file,
         })
     }
@@ -67,7 +73,11 @@ impl Remote {
     }
 
     pub fn takeoff(&self) -> Result<Conn> {
-        let mut endpoint = self.provider.up()?;
+        let started = self
+            .provider
+            .up(&self.provider_config, &UiHost)
+            .with_context(|| self.context())?;
+        let mut endpoint = started.endpoint;
         let common = &self.config.common;
         if common.remote_dir.is_some() {
             endpoint.remote_dir = common.remote_dir.clone();
@@ -78,7 +88,7 @@ impl Remote {
             .extend(common.ssh_options.iter().cloned());
 
         let mut conn = Conn::new(endpoint, String::new())?;
-        let timeout = self.provider.boot_timeout();
+        let timeout = started.boot_timeout;
         let deadline = Instant::now() + timeout;
         let mut waiting = false;
         conn.home = loop {
@@ -122,14 +132,16 @@ impl Remote {
             Conn::new(state.endpoint, state.home)?.close_master();
         }
         let _ = fs::remove_file(&self.state_file);
-        self.provider.down()
+        self.provider
+            .down(&self.provider_config, &UiHost)
+            .with_context(|| self.context())
     }
 
     /// Delete the provider's resources, our cached state and the config entry.
     pub fn purge(&self) -> Result<bool> {
         let purged = self
             .provider
-            .purge()
+            .purge(&self.provider_config, &UiHost)
             .with_context(|| format!("can't purge remote `{}`", self.name))?;
         if !purged {
             return Ok(false);
@@ -143,7 +155,10 @@ impl Remote {
     }
 
     pub fn status(&self) -> Result<String> {
-        let mut status = self.provider.status()?;
+        let mut status = self
+            .provider
+            .status(&self.provider_config, &UiHost)
+            .with_context(|| self.context())?;
         match self.load_state() {
             Some(state) => {
                 let conn = Conn::new(state.endpoint, state.home)?;
@@ -157,6 +172,13 @@ impl Remote {
             None => status += ", not connected",
         }
         Ok(status)
+    }
+
+    fn context(&self) -> String {
+        format!(
+            "remote `{}` (provider `{}`)",
+            self.name, self.config.provider
+        )
     }
 
     fn load_state(&self) -> Option<State> {
@@ -203,11 +225,28 @@ impl Conn {
         &self.endpoint.env
     }
 
+    pub fn prelude(&self) -> Option<&str> {
+        self.endpoint.prelude.as_deref()
+    }
+
     /// `ssh` running a POSIX shell command with the remote's environment set up.
     pub fn shell(&self, command: &str) -> Result<Command> {
-        let script = format!("{}{command}", env_prelude(self.env())?);
+        let script = format!("{}{command}", env_prelude(self.prelude(), self.env())?);
         let mut cmd = self.ssh();
         cmd.arg(format!("sh -c {}", util::shell_quote(&script)));
+        Ok(cmd)
+    }
+
+    /// `ssh -t` running `script` (after the environment prelude) on a
+    /// terminal, for interactive programs.
+    pub fn interactive(&self, script: &str) -> Result<Command> {
+        let script = format!("{}{script}", env_prelude(self.prelude(), self.env())?);
+        let mut cmd = Command::new("ssh");
+        cmd.args(self.ssh_options())
+            // -q: no "Shared connection closed" when the shell exits.
+            .args(["-t", "-q"])
+            .arg(&self.endpoint.host)
+            .arg(format!("sh -c {}", util::shell_quote(&script)));
         Ok(cmd)
     }
 
@@ -290,11 +329,16 @@ impl Conn {
     }
 }
 
-/// Shell lines making rustup's toolchain available and exporting `env`.
-pub fn env_prelude(env: &BTreeMap<String, String>) -> Result<String> {
+/// Shell lines running the provider's `prelude`, making rustup's toolchain
+/// available and exporting `env`.
+pub fn env_prelude(prelude: Option<&str>, env: &BTreeMap<String, String>) -> Result<String> {
+    let mut script = prelude.unwrap_or_default().to_owned();
+    if !script.is_empty() && !script.ends_with('\n') {
+        script.push('\n');
+    }
     // `.` on a missing file makes dash exit, so check first: the Fly image
     // has no ~/.cargo/env (its toolchain comes from PATH).
-    let mut script = String::from("[ -f \"$HOME/.cargo/env\" ] && . \"$HOME/.cargo/env\"\n");
+    script += "[ -f \"$HOME/.cargo/env\" ] && . \"$HOME/.cargo/env\"\n";
     for (key, value) in env {
         let valid = key
             .chars()

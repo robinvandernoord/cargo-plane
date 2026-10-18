@@ -1,68 +1,71 @@
 //! Providers manage a remote machine's lifecycle and say how to reach it.
 //! Everything else (sync, running cargo, fetching artifacts) is shared.
+//!
+//! Each provider is its own crate (`crates/cargo-plane-provider-*`) that
+//! builds a plugin binary. The ones enabled as features are also compiled in;
+//! any other provider is looked up as a plugin binary on PATH.
 
-mod fly;
-mod ssh;
-
-use std::collections::BTreeMap;
-use std::time::Duration;
+mod plugin;
 
 use anyhow::{Result, bail};
-use serde::{Deserialize, Serialize};
+pub use cargo_plane_provider::{AnyProvider, Endpoint};
 
-use crate::config::RemoteConfig;
-
-pub use fly::setup as setup_fly;
-
-/// How to reach a running remote over SSH.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Endpoint {
-    pub host: String,
-    #[serde(default)]
-    pub user: Option<String>,
-    #[serde(default)]
-    pub port: Option<u16>,
-    /// Extra arguments for `ssh`, e.g. `["-o", "HostKeyAlias=..."]`.
-    #[serde(default)]
-    pub ssh_options: Vec<String>,
-    /// Base directory for synced projects: absolute, or relative to the remote `$HOME`.
-    #[serde(default)]
-    pub remote_dir: Option<String>,
-    /// Environment for remote cargo invocations.
-    #[serde(default)]
-    pub env: BTreeMap<String, String>,
+struct Builtin {
+    name: &'static str,
+    /// What `setup` creates; `None` if it has no setup.
+    setup: Option<&'static str>,
+    make: fn() -> Box<dyn AnyProvider>,
 }
 
-pub trait Provider {
-    /// Make sure the remote is running and return how to reach it.
-    /// May be slow (booting a machine); the result is cached between runs.
-    fn up(&self) -> Result<Endpoint>;
+const BUILTINS: &[Builtin] = &[
+    #[cfg(feature = "ssh")]
+    Builtin {
+        name: "ssh",
+        setup: Some("an existing SSH host"),
+        make: || Box::new(cargo_plane_provider_ssh::Ssh),
+    },
+    #[cfg(feature = "fly")]
+    Builtin {
+        name: "fly",
+        setup: Some("a Fly.io machine that stops itself when idle"),
+        make: || Box::new(cargo_plane_provider_fly::Fly),
+    },
+    #[cfg(feature = "codespace")]
+    Builtin {
+        name: "codespace",
+        setup: Some("a GitHub Codespace, or pick an existing one"),
+        make: || Box::new(cargo_plane_provider_codespace::Codespace),
+    },
+];
 
-    /// Stop, suspend or destroy the remote.
-    fn down(&self) -> Result<()>;
-
-    /// Human-readable state of the remote.
-    fn status(&self) -> Result<String>;
-
-    /// Permanently delete everything the provider created, after asking.
-    /// Returns `false` if the user backed out.
-    fn purge(&self) -> Result<bool> {
-        bail!("this provider doesn't create anything, so there's nothing to purge")
-    }
-
-    /// How long SSH may take to come up after `up()` returns.
-    fn boot_timeout(&self) -> Duration {
-        Duration::ZERO
-    }
+/// Built-in providers with a setup, and what it creates.
+pub fn builtin_setups() -> impl Iterator<Item = (&'static str, &'static str)> {
+    std::iter::once(("local", "direct local execution"))
+        .chain(BUILTINS.iter().filter_map(|b| Some((b.name, b.setup?))))
 }
 
-pub fn from_config(remote: &RemoteConfig) -> Result<Box<dyn Provider>> {
-    Ok(match remote.provider.as_str() {
-        "ssh" => Box::new(ssh::Ssh::new(remote.provider_config()?)),
-        "fly" => Box::new(fly::Fly::new(remote.provider_config()?)),
-        other => bail!(
-            "unknown provider `{other}` for remote `{}` (available: ssh, fly)",
-            remote.name
-        ),
-    })
+/// Names of the provider plugins on PATH that aren't built in.
+pub fn plugins() -> Vec<String> {
+    let mut plugins = plugin::installed();
+    plugins.retain(|name| name != "local" && !BUILTINS.iter().any(|b| b.name == name));
+    plugins
+}
+
+/// The built-in provider called `name`, or else the plugin binary for it.
+pub fn lookup(name: &str) -> Result<Box<dyn AnyProvider>> {
+    if let Some(builtin) = BUILTINS.iter().find(|b| b.name == name) {
+        return Ok((builtin.make)());
+    }
+    if let Some(plugin) = plugin::Plugin::locate(name) {
+        return Ok(Box::new(plugin));
+    }
+    let builtins: Vec<_> = BUILTINS.iter().map(|b| b.name).collect();
+    let builtins = match builtins.as_slice() {
+        [] => "this cargo-plane has none built in".to_owned(),
+        names => format!("built in: {}", names.join(", ")),
+    };
+    bail!(
+        "unknown provider `{name}` ({builtins}) and there's no `{}` on PATH",
+        plugin::binary_name(name)
+    )
 }
