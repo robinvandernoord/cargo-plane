@@ -4,8 +4,9 @@ Cargo, but in the cloud(s). ✈️
 
 `cargo plane <command>` syncs your workspace to a remote machine, runs cargo
 there and streams the output back, so a weak laptop doesn't have to do the
-compiling. Providers handle the remote's lifecycle: a plain SSH host, or a
-Fly.io Machine that starts on demand and stops itself when idle.
+compiling. Providers handle the remote's lifecycle: a plain SSH host, a
+Fly.io Machine that starts on demand and stops itself when idle, or a GitHub
+Codespace.
 
 ```sh
 cargo plane check
@@ -26,6 +27,26 @@ and a Rust toolchain (rustup's `~/.cargo/env` is sourced automatically).
 
 ## Configure
 
+Run setup inside your Cargo project to create its configuration:
+
+```sh
+cargo plane setup local          # build on this machine
+cargo plane setup ssh            # asks for an existing SSH hostname or alias
+cargo plane setup ssh my-box --user robin --port 2222
+cargo plane setup fly            # create a Fly.io machine
+cargo plane setup codespace      # create or pick a GitHub Codespace
+```
+
+Use `cargo plane --remote <name> setup <provider>` to name the configuration.
+SSH setup connects to an existing machine, checks its build tools, and offers
+to install missing rsync, a C compiler and Rust. System packages need root or
+passwordless sudo; Rust is installed in the remote account using rustup, with
+clippy and rustfmt. Supported package managers are apt-get, dnf, yum, apk,
+pacman and zypper. On other systems, install the missing tools manually and
+rerun setup. Existing working tools are kept. For unattended provisioning, use
+`cargo plane setup ssh my-box --yes`. Setup finishes by verifying the tools;
+rerunning it preserves configuration and skips installation when tools work.
+
 `.cargo/plane.toml` in your project, or `~/.config/cargo-plane/config.toml`
 (project settings override global ones):
 
@@ -45,6 +66,36 @@ host = "my-build-box"       # hostname or ~/.ssh/config alias
 Pick another remote per invocation with `cargo plane --remote <name> ...` or
 `CARGO_PLANE_REMOTE=<name>`.
 
+`.cargo/` is Cargo's own directory; cargo-plane only adds `plane.toml` to it.
+When `cargo plane setup` creates that file, it also adds it to
+`.cargo/.gitignore`, since the machines it describes are yours. Remove that line
+to share a remote with your team. `.cargo/config.toml` isn't touched.
+
+### Local execution
+
+On a machine that can build locally, run `cargo plane setup local`, or select
+the built-in `local` provider in your untracked `.cargo/plane.toml` (or global config):
+
+```toml
+remote = "local"
+
+[remotes.local]
+provider = "local"
+```
+
+Shared scripts can keep using `cargo plane check`, `cargo plane run`, and other
+Cargo commands. The local provider runs Cargo directly in the current directory,
+with the original arguments, terminal access and exit status. No SSH, syncing or
+artifact copying is needed. Configured `env` values also apply locally.
+
+`exec` runs a local command and `shell` opens your local `$SHELL` (or `/bin/sh`).
+`test --local-run` runs ordinary local tests, with the redundant `--local-run`
+flag removed. `takeoff` and `land` succeed without doing anything; `status`
+reports local execution, and `purge` reports that there is nothing to delete.
+Local setup only writes configuration and needs no SSH connection.
+To switch between configured local and remote
+providers, use `--remote <name>` or `CARGO_PLANE_REMOTE` as usual.
+
 ### Fly.io
 
 ```sh
@@ -54,7 +105,109 @@ cargo plane setup fly
 Run it inside a project: installs flyctl if needed, logs you in, creates a
 throwaway build machine for that project that stops itself when idle, and adds
 it to the project's `.cargo/plane.toml`. `cargo plane purge fly` deletes it. See
-[`contrib/fly`](contrib/fly/README.md).
+[`crates/cargo-plane-provider-fly`](crates/cargo-plane-provider-fly/README.md).
+
+### GitHub Codespaces
+
+```sh
+cargo plane setup codespace
+```
+
+Run it inside a project with the [GitHub CLI](https://cli.github.com) installed.
+It logs you in with the `codespace` scope if needed, creates a codespace from
+the project's repository (or lets you pick an existing one), asks for a machine
+type and idle timeout, and adds it to `.cargo/plane.toml`:
+
+```toml
+[remotes.codespace]
+provider = "codespace"
+codespace = "fluffy-space-waffle-q7xj9"   # from `gh codespace list`
+# gh = "/path/to/gh"                       # default: gh on PATH
+```
+
+Then it installs rsync, a C compiler and rustup on the codespace if they're
+missing, after asking. A Rust toolchain from the repository's dev container
+(the `rust` feature or the `devcontainers/rust` image) is used as is. One that
+setup installed lives in the codespace's home directory, which a rebuild of the
+codespace wipes, so add the feature to `.devcontainer/devcontainer.json` if you
+rebuild often:
+
+```json
+"features": { "ghcr.io/devcontainers/features/rust:1": {} }
+```
+
+SSH goes through `gh codespace ssh`, which starts a stopped codespace on demand;
+the codespace needs an SSH server, which GitHub's default image has.
+Builds live in `/workspaces/.cargo-plane`, which survives stops and rebuilds.
+GitHub stops the codespace after its idle timeout and bills it per core-hour
+while it runs, plus storage; personal accounts get a monthly allowance of both
+for free. GitHub decides what counts as idle, so keep the timeout longer than
+your slowest build. Stopped codespaces are deleted after their retention
+period (30 days by default); run setup again to get a new one.
+`cargo plane purge codespace` deletes it right away.
+
+### Provider plugins
+
+Remote providers are plugins: binaries named `cargo-plane-provider-<name>`. A
+remote with `provider = "<name>"` uses it, and `cargo plane setup <name>` runs
+its setup, if it has one. The providers in this repo live in
+[`crates/`](crates) and build such a binary each; cargo-plane also compiles
+them in (Cargo features `ssh`, `fly` and `codespace`, on by default), so they
+work without installing anything. For a provider that isn't built in,
+cargo-plane looks on your PATH:
+
+```sh
+cargo install cargo-plane-provider-<name>
+cargo plane setup <name>
+```
+
+To leave a provider out of cargo-plane and use its plugin binary instead:
+
+```sh
+cargo install cargo-plane --no-default-features --features ssh
+cargo install cargo-plane-provider-fly
+```
+
+Plugins are written in Rust against the
+[`cargo-plane-provider`](crates/cargo-plane-provider) crate. Implement its
+`Provider` trait and hand it to `run`:
+
+```rust
+use cargo_plane_provider::{Endpoint, Host, Provider, run};
+
+#[derive(serde::Deserialize)]
+struct Config { host: String }
+
+struct MyProvider;
+
+impl Provider for MyProvider {
+    type Config = Config;   // the remote's table from .cargo/plane.toml
+
+    fn up(&self, config: &Config, host: &dyn Host) -> anyhow::Result<Endpoint> {
+        host.status("Starting", &config.host);
+        // start the machine...
+        Ok(Endpoint::new(&config.host))
+    }
+    fn down(&self, config: &Config, host: &dyn Host) -> anyhow::Result<()> { todo!() }
+    fn status(&self, config: &Config, host: &dyn Host) -> anyhow::Result<String> { todo!() }
+    // optional: purge, boot_timeout, setup
+}
+
+fn main() -> std::process::ExitCode {
+    run(MyProvider)
+}
+```
+
+cargo-plane starts the plugin the first time a command needs the provider (not
+on every build: the endpoint is cached) and talks to it over a Unix socket. The
+plugin keeps the terminal, so tools it runs can prompt as usual. Questions and
+status lines go through `Host`, so they look like the rest of cargo-plane.
+During setup, `Host` can also save the remote's config and run commands on it.
+See [`crates/cargo-plane-provider-ssh`](crates/cargo-plane-provider-ssh/src/lib.rs)
+for the smallest complete provider, and the Fly and Codespaces crates for ones
+with a setup.
+
+Plugins run with your permissions, like any program you install.
 
 ## Commands
 
@@ -65,8 +218,16 @@ Every cargo command runs remotely as-is, except:
 | `build`                     | Also copies binaries and cdylib/dylib/staticlib files back       |
 | `run`                       | Builds remotely, copies the binary back, runs it locally         |
 | `test --local-run`          | Builds tests remotely, runs them locally (e.g. hardware tests)   |
+| `fmt`                       | Runs locally: it's cheap, and remote changes would be overwritten |
+| `clippy`                    | Adds the clippy component first if the remote toolchain lacks it |
+| `fix`, `clippy --fix`       | Copies the fixed files back (needs a clean git tree, like cargo) |
+| `add`, `remove`, `update`   | Copies `Cargo.toml` and `Cargo.lock` back                         |
+| `exec <command>`            | Runs any command in the project's directory on the remote        |
+| `shell`                     | Opens an interactive shell there                                 |
 | `takeoff` / `land`          | Start / stop the remote                                          |
 | `setup fly`                 | Create a Fly.io build machine and configure it as a remote       |
+| `setup codespace`           | Create or pick a GitHub Codespace and configure it as a remote   |
+| `setup <plugin>`            | Run a provider plugin's setup                                    |
 | `purge`                     | Permanently delete what `setup` created (asks you to type the name) |
 | `status`                    | Show the remote's state                                          |
 
@@ -90,6 +251,13 @@ workspace, so diagnostics land on the right files.
   the first command each step costs about one round trip.
 - If you interrupt cargo-plane or lose the connection, the remote cargo is
   stopped too.
+
+Commands that edit files (`fix`, `clippy --fix`, `add`, `remove`, `update`,
+`generate-lockfile`) copy what they changed back. A file you edit locally while
+such a command runs is kept as is; if cargo changed it too, cargo's version is
+saved in `target/cargo-plane/conflicts/`. Before `fix` and `clippy --fix`,
+cargo-plane checks for uncommitted changes locally, as cargo would (the remote
+copy has no `.git`); `--allow-dirty` and `--allow-staged` work as usual.
 
 ## Caveats
 
