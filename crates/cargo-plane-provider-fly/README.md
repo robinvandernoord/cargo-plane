@@ -33,6 +33,40 @@ so the machine doesn't need a public IP.
 `cargo plane takeoff` / `land` start and stop the machine; other commands
 start it when needed.
 
+For unattended setup, authenticate with `flyctl auth login` beforehand or set
+`FLY_API_TOKEN`, then pass `-y` and an explicit region:
+
+```sh
+cargo plane setup fly -y --region ams
+cargo plane setup fly -y --region ams --ram 16
+cargo plane setup fly -y --region ams --app my-builder --org personal \
+  --machine performance-4x --ram 16 --volume-size 40 --idle-timeout 30 \
+  --ssh-key ~/.ssh/id_ed25519
+```
+
+`-y` / `--yes` accepts flyctl installation and resource creation, uses defaults
+for omitted choices, and never opens browser login. `--region` is required
+with `-y`; the command errors before making changes if it is missing.
+All setup choices have flags, which also work in interactive setup:
+
+| Flag | Default |
+| --- | --- |
+| `--app <name>` | Configured app, otherwise `cargo-plane-<project>-<user>` |
+| `--org <slug>` | Only available org, otherwise `personal` |
+| `--region <code>` | Existing volume's region, otherwise asked interactively |
+| `--machine <size>` | `performance-4x` |
+| `--ram <size>` | Machine preset; accepts `16`, `16G`, `512M`, etc. |
+| `--volume-size <GB>` | 20 |
+| `--idle-timeout <minutes>` | 15 |
+| `--ssh-key <path>` | First detected key pair, preferring standard SSH identities |
+
+RAM must fit the selected machine's limits and be a multiple of 256 MB.
+SSH key paths may point to either the private key or its `.pub` file; both
+files must exist. Existing builders are reused unless `--rebuild` is passed,
+so machine, RAM, idle timeout and SSH key choices apply when creating a builder.
+Existing volumes are kept; `--volume-size` does not resize them and an explicit
+`--region` must match their region. `--org` only applies when creating an app.
+
 ## Costs and removal
 
 The machine is billed per second while it runs and stops itself after the idle

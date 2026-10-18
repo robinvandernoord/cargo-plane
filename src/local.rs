@@ -10,10 +10,12 @@ use crate::config::RemoteConfig;
 use crate::{cargo_args, ui};
 
 pub fn setup(setup: &Setup, host: &dyn Host) -> Result<()> {
-    const USAGE: &str = "Usage: cargo plane [--remote <name>] setup local\n\n\
-        Adds local execution to the project's .cargo/plane.toml. Safe to rerun.\n";
+    const USAGE: &str = "Usage: cargo plane [--remote <name>] setup local [-y|--yes]\n\n\
+        Adds local execution to the project's .cargo/plane.toml. Safe to rerun.\n\
+        Always non-interactive; -y and --yes are accepted for consistency.\n";
     match setup.args.as_slice() {
         [] => host.save_config(&serde_json::json!({})),
+        [yes] if yes == "-y" || yes == "--yes" => host.save_config(&serde_json::json!({})),
         [help] if help == "-h" || help == "--help" => {
             print!("{USAGE}");
             Ok(())

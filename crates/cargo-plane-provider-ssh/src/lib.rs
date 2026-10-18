@@ -8,14 +8,15 @@ use serde::Deserialize;
 use serde_json::json;
 
 const SETUP_USAGE: &str = "\
-Usage: cargo plane [--remote <name>] setup ssh [host] [--user <name>] [--port <port>] [--yes]
+Usage: cargo plane [--remote <name>] setup ssh [host] [--host <host>] [--user <name>] [--port <port>] [--yes]
 
 Configure an existing SSH host (a hostname or ~/.ssh/config alias).
 Without a host argument, asks for one in a terminal. User and port default to
 your SSH configuration. Saves .cargo/plane.toml, then checks the build tools.
 Offers to install missing rsync, a C compiler and Rust via rustup. System
 packages need root or passwordless sudo. Use --yes to accept installation
-without prompts. Supported package managers: apt-get, dnf, yum, apk, pacman,
+without prompts; an existing configured hostname is reused. --host is an alias
+for the positional hostname. Supported package managers: apt-get, dnf, yum, apk, pacman,
 and zypper. Other systems can use tools installed manually.
 Safe to rerun; existing settings are preserved unless overridden.
 ";
@@ -44,6 +45,16 @@ impl Provider for Ssh {
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--yes" | "-y" => yes = true,
+                "--host" => {
+                    let name = args.next().context("--host needs a value")?;
+                    if name.trim().is_empty() || name.starts_with('-') {
+                        bail!("--host needs a nonempty SSH hostname or alias");
+                    }
+                    if update.get("host").is_some() {
+                        bail!("provide the SSH hostname only once, as an argument or with --host");
+                    }
+                    update["host"] = json!(name);
+                }
                 "--user" => {
                     let user = args.next().context("--user needs a value")?;
                     if user.is_empty() || user.starts_with('-') {
@@ -74,7 +85,7 @@ impl Provider for Ssh {
                 .as_ref()
                 .and_then(|config| config.get("host"))
                 .and_then(serde_json::Value::as_str);
-            let name = if host.interactive() {
+            let name = if !yes && host.interactive() {
                 host.ask("SSH hostname or alias", existing)?
             } else {
                 existing

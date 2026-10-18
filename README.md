@@ -76,6 +76,9 @@ cargo plane setup codespace      # create or pick a GitHub Codespace
 ```
 
 Use `cargo plane --remote <name> setup <provider>` to name the configuration.
+All built-in providers accept `-y` / `--yes` to skip setup prompts. Local setup
+always runs without prompts. SSH accepts a positional hostname or `--host`,
+plus `--user` and `--port`; with `-y`, an existing hostname is reused if omitted.
 SSH setup connects to an existing machine, checks its build tools, and offers
 to install missing rsync, a C compiler and Rust. System packages need root or
 passwordless sudo; Rust is installed in the remote account using rustup, with
@@ -145,6 +148,13 @@ throwaway build machine for that project that stops itself when idle, and adds
 it to the project's `.cargo/plane.toml`. `cargo plane purge fly` deletes it. See
 [`crates/cargo-plane-provider-fly`](crates/cargo-plane-provider-fly/README.md).
 
+For unattended setup, authenticate beforehand with `flyctl auth login` or
+`FLY_API_TOKEN`, then run `cargo plane setup fly -y --region ams`. `--region`
+is required with `-y`. Override choices with `--app`, `--org`, `--machine`,
+`--ram`, `--volume-size`, `--idle-timeout` and `--ssh-key`; omitted choices
+use the interactive defaults. Existing builders are reused unless `--rebuild`
+is passed.
+
 ### GitHub Codespaces
 
 ```sh
@@ -162,6 +172,27 @@ provider = "codespace"
 codespace = "fluffy-space-waffle-q7xj9"   # from `gh codespace list`
 # gh = "/path/to/gh"                       # default: gh on PATH
 ```
+
+For unattended setup, authenticate GitHub with `codespace` access beforehand
+(using `gh auth login --scopes codespace` or `GH_TOKEN`), then run:
+
+```sh
+cargo plane setup codespace -y
+cargo plane setup codespace -y --ram 16
+cargo plane setup codespace -y --codespace existing-codespace-name
+cargo plane setup codespace -y --repo owner/repo --machine standardLinux32gb --idle-timeout 60
+```
+
+`-y` accepts creation and missing-tool installation, uses the detected repository,
+prefers a 4-CPU machine (otherwise the largest available), and stops it after
+30 idle minutes. `--ram` takes a positive whole number of GB and selects the
+fewest CPUs with at least that much RAM, preferring less RAM when CPU counts
+match. Use either `--ram` or `--machine`. `--devcontainer-path` selects a specific
+devcontainer; unattended creation otherwise uses GitHub's default configuration
+and opts out of additional repository permissions. Creation flags only affect
+new codespaces. An existing configured codespace is reused, while an unconfigured
+remote creates a new one, matching the interactive default.
+`--codespace <name>` explicitly selects an existing codespace instead.
 
 Then it installs rsync, a C compiler and rustup on the codespace if they're
 missing, after asking. A Rust toolchain from the repository's dev container
