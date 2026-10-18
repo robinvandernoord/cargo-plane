@@ -98,6 +98,17 @@ pub fn flag_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
     None
 }
 
+/// The cargo subcommand (`build`, `clippy`, ...), if any.
+pub fn subcommand(args: &[String]) -> Option<&str> {
+    subcommand_index(args).map(|i| args[i].as_str())
+}
+
+/// The toolchain picked with `+toolchain` before the subcommand, if any.
+pub fn toolchain(args: &[String]) -> Option<&str> {
+    let end = subcommand_index(args).unwrap_or(args.len());
+    args[..end].iter().find_map(|a| a.strip_prefix('+'))
+}
+
 fn subcommand_index(args: &[String]) -> Option<usize> {
     let mut i = 0;
     while i < args.len() {
@@ -152,6 +163,21 @@ fn cargo_call(global: &[String], sub: &str, rest: &[String], extra: &[&str]) -> 
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn finds_subcommand_and_toolchain() {
+        let args = |s: &str| s.split(' ').map(String::from).collect::<Vec<_>>();
+        assert_eq!(
+            subcommand(&args("+nightly -v clippy --fix")),
+            Some("clippy")
+        );
+        assert_eq!(
+            toolchain(&args("+nightly -v clippy --fix")),
+            Some("nightly")
+        );
+        assert_eq!(toolchain(&args("build +x")), None);
+        assert_eq!(subcommand(&args("--color always fmt")), Some("fmt"));
+    }
     use super::*;
 
     fn s(args: &[&str]) -> Vec<String> {

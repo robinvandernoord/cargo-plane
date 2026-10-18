@@ -46,6 +46,11 @@ host = "my-build-box"       # hostname or ~/.ssh/config alias
 Pick another remote per invocation with `cargo plane --remote <name> ...` or
 `CARGO_PLANE_REMOTE=<name>`.
 
+`.cargo/` is Cargo's own directory; cargo-plane only adds `plane.toml` to it.
+When `cargo plane setup` creates that file, it also adds it to
+`.cargo/.gitignore`, since the machines it describes are yours. Remove that line
+to share a remote with your team. `.cargo/config.toml` isn't touched.
+
 ### Fly.io
 
 ```sh
@@ -168,6 +173,10 @@ Every cargo command runs remotely as-is, except:
 | `build`                     | Also copies binaries and cdylib/dylib/staticlib files back       |
 | `run`                       | Builds remotely, copies the binary back, runs it locally         |
 | `test --local-run`          | Builds tests remotely, runs them locally (e.g. hardware tests)   |
+| `fmt`                       | Runs locally: it's cheap, and remote changes would be overwritten |
+| `clippy`                    | Adds the clippy component first if the remote toolchain lacks it |
+| `exec <command>`            | Runs any command in the project's directory on the remote        |
+| `shell`                     | Opens an interactive shell there                                 |
 | `takeoff` / `land`          | Start / stop the remote                                          |
 | `setup fly`                 | Create a Fly.io build machine and configure it as a remote       |
 | `setup codespace`           | Create or pick a GitHub Codespace and configure it as a remote   |

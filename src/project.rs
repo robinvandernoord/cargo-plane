@@ -141,11 +141,23 @@ impl Project {
 
     /// Run cargo on the remote, streaming its output with paths rewritten.
     pub fn cargo(&self, conn: &Conn, args: &[String], stdout: Stdout) -> Result<Outcome> {
+        self.run(conn, "cargo", args, stdout)
+    }
+
+    /// Run `program` on the remote in the current directory's counterpart,
+    /// streaming its output with paths rewritten.
+    pub fn run(
+        &self,
+        conn: &Conn,
+        program: &str,
+        args: &[String],
+        stdout: Stdout,
+    ) -> Result<Outcome> {
         let args: Vec<String> = args
             .iter()
             .map(|a| a.replace(&self.local_root_str, &self.remote_root))
             .collect();
-        let script = self.script(conn, &args)?;
+        let script = self.script(conn, program, &args)?;
 
         let mut child = conn
             .ssh()
@@ -254,7 +266,15 @@ impl Project {
         Ok(())
     }
 
-    fn script(&self, conn: &Conn, args: &[String]) -> Result<String> {
+    /// The remote counterpart of the current directory.
+    pub fn remote_cwd(&self) -> String {
+        match self.subdir.as_str() {
+            "" => self.remote_root.clone(),
+            sub => format!("{}/{sub}", self.remote_root),
+        }
+    }
+
+    fn script(&self, conn: &Conn, program: &str, args: &[String]) -> Result<String> {
         let mut env: BTreeMap<String, String> = conn.env().clone();
         for var in FORWARDED_ENV {
             if let Ok(value) = std::env::var(var) {
@@ -278,11 +298,10 @@ impl Project {
         }
 
         let mut script = env_prelude(conn.prelude(), &env)?;
-        let cwd = match self.subdir.as_str() {
-            "" => self.remote_root.clone(),
-            sub => format!("{}/{sub}", self.remote_root),
-        };
-        script += &format!("cd {} || exit 1\n", shell_quote(&cwd));
+        script += &format!("cd {} || exit 1\n", shell_quote(&self.remote_cwd()));
+        if program == "cargo" {
+            script += &add_missing_component(args);
+        }
         // `setsid` puts cargo in its own process group, so the watcher can stop
         // cargo and everything it spawned once our stdin closes (the local
         // side was interrupted or lost its connection). SIGTERM, because
@@ -290,7 +309,11 @@ impl Project {
         // Background jobs get /dev/null as stdin, so hand the watcher ours via fd 3.
         script += "exec 3<&0\n";
         script += "s=; command -v setsid >/dev/null 2>&1 && s=setsid\n";
-        script += &format!("$s cargo {} </dev/null &\n", shell_join(args));
+        script += &format!(
+            "$s {} {} </dev/null &\n",
+            shell_quote(program),
+            shell_join(args)
+        );
         script += "pid=$!\n";
         script += "$s sh -c 'cat >/dev/null; kill -TERM -$1 || kill -TERM $1' sh $pid <&3 >/dev/null 2>&1 &\n";
         script += "w=$!\n";
@@ -299,5 +322,45 @@ impl Project {
         script += "kill -TERM -$w 2>/dev/null || kill -TERM $w 2>/dev/null\n";
         script += "exit $rc\n";
         Ok(script)
+    }
+}
+
+/// For `cargo clippy`: shell lines adding the rustup component if the
+/// toolchain lacks it (rustup's minimal profile, the official Docker images).
+/// After `cd`, so `rust-toolchain.toml` picks the toolchain.
+fn add_missing_component(args: &[String]) -> String {
+    let Some(sub) = cargo_args::subcommand(args) else {
+        return String::new();
+    };
+    if sub != "clippy" {
+        return String::new();
+    }
+    let (plus, toolchain) = match cargo_args::toolchain(args) {
+        Some(t) => (format!("+{t} "), format!(" --toolchain {}", shell_quote(t))),
+        None => (String::new(), String::new()),
+    };
+    format!(
+        "if ! cargo {plus}{sub} --version >/dev/null 2>&1 && command -v rustup >/dev/null 2>&1; then \
+         rustup component add{toolchain} clippy >&2; fi\n"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(s: &str) -> Vec<String> {
+        s.split(' ').map(String::from).collect()
+    }
+
+    #[test]
+    fn adds_clippy_only_for_clippy() {
+        assert_eq!(add_missing_component(&args("build")), "");
+        assert_eq!(add_missing_component(&args("fmt")), "");
+        assert_eq!(
+            add_missing_component(&args("+nightly clippy")),
+            "if ! cargo +nightly clippy --version >/dev/null 2>&1 && command -v rustup >/dev/null 2>&1; \
+             then rustup component add --toolchain nightly clippy >&2; fi\n"
+        );
     }
 }

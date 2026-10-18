@@ -28,6 +28,8 @@ const USAGE: &str = "\
 Cargo, but in the cloud(s): run cargo on a remote machine.
 
 Usage: cargo plane [--remote <name>] <cargo command> [args...]
+       cargo plane [--remote <name>] exec <command> [args...]
+       cargo plane [--remote <name>] shell
        cargo plane takeoff | land | status | purge [<remote>]
        cargo plane [--remote <name>] setup <provider> [--help]
 
@@ -45,6 +47,10 @@ Lifecycle:
   takeoff   start the remote and connect
   land      disconnect and stop the remote
   status    show the remote's state
+
+Other commands, in the project's directory on the remote (synced first):
+  exec      run any command, e.g. `cargo plane exec rustup component add miri`
+  shell     open an interactive shell
   purge     permanently delete what `setup` created (asks first)
 
 Options:
@@ -170,6 +176,8 @@ fn run() -> Result<ExitCode> {
             println!("{}: {}", remote.name, remote.status()?);
             Ok(ExitCode::SUCCESS)
         }
+        "exec" => exec(&remote, &args[1..]),
+        "shell" => shell(&remote, &args[1..]),
         _ => cargo(&remote, args),
     }
 }
@@ -232,7 +240,69 @@ fn setup(provider_name: &str, remote_name: Option<&str>, args: &[String]) -> Res
     host.finish()
 }
 
+/// The synced project around the current directory, if we're in one.
+fn synced_project(conn: &Conn) -> Result<Option<Project>> {
+    match Project::locate(&[], conn) {
+        Ok(project) => {
+            project.sync(conn)?;
+            Ok(Some(project))
+        }
+        // Outside a workspace there's nothing to sync; use the remote $HOME.
+        Err(_) => Ok(None),
+    }
+}
+
+/// `cargo plane exec <command>`: any command, in the project's directory.
+fn exec(remote: &Remote, args: &[String]) -> Result<ExitCode> {
+    let args = match args {
+        [dashes, rest @ ..] if dashes == "--" => rest,
+        args => args,
+    };
+    let [program, args @ ..] = args else {
+        bail!("usage: cargo plane exec <command> [args...]");
+    };
+    let conn = remote.connect()?;
+    match synced_project(&conn)? {
+        Some(project) => {
+            let outcome = project.run(&conn, program, args, Stdout::Passthrough)?;
+            Ok(exit_code(outcome.code))
+        }
+        None => {
+            let command = util::shell_join(std::iter::once(program).chain(args));
+            let status = conn.shell(&command)?.status()?;
+            Ok(exit_code(status.code().unwrap_or(1)))
+        }
+    }
+}
+
+/// `cargo plane shell`: an interactive shell in the project's directory.
+fn shell(remote: &Remote, args: &[String]) -> Result<ExitCode> {
+    if let Some(arg) = args.first() {
+        bail!("unexpected argument `{arg}`; to run a command, use `cargo plane exec`");
+    }
+    let conn = remote.connect()?;
+    let mut script = String::new();
+    if let Some(project) = synced_project(&conn)? {
+        script += &format!(
+            "cd {} || exit 1\n",
+            util::shell_quote(&project.remote_cwd())
+        );
+    }
+    script += "exec \"${SHELL:-/bin/sh}\"\n";
+    let status = conn.interactive(&script)?.status()?;
+    Ok(exit_code(status.code().unwrap_or(1)))
+}
+
 fn cargo(remote: &Remote, args: Vec<String>) -> Result<ExitCode> {
+    // Formatting is cheap, and done remotely the next sync would undo it.
+    if cargo_args::subcommand(&args) == Some("fmt") {
+        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+        let status = Command::new(cargo)
+            .args(&args)
+            .status()
+            .context("running cargo fmt")?;
+        return Ok(exit_code(status.code().unwrap_or(1)));
+    }
     ui::set_quiet(cargo_args::is_quiet(&args));
     let conn = remote.connect()?;
     let project = Project::locate(&args, &conn)?;

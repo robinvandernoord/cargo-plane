@@ -325,7 +325,7 @@ fn provision(host: &dyn Host) -> Result<()> {
         run(
             host,
             "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
-             sh -s -- -y --profile minimal",
+             sh -s -- -y --profile minimal --component clippy",
         )?;
     }
     Ok(())

@@ -237,6 +237,19 @@ impl Conn {
         Ok(cmd)
     }
 
+    /// `ssh -t` running `script` (after the environment prelude) on a
+    /// terminal, for interactive programs.
+    pub fn interactive(&self, script: &str) -> Result<Command> {
+        let script = format!("{}{script}", env_prelude(self.prelude(), self.env())?);
+        let mut cmd = Command::new("ssh");
+        cmd.args(self.ssh_options())
+            // -q: no "Shared connection closed" when the shell exits.
+            .args(["-t", "-q"])
+            .arg(&self.endpoint.host)
+            .arg(format!("sh -c {}", util::shell_quote(&script)));
+        Ok(cmd)
+    }
+
     /// SSH options, without the destination. One control master per
     /// destination keeps later connections down to a single round trip.
     fn ssh_options(&self) -> Vec<String> {

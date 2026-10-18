@@ -3,6 +3,9 @@
 # so builds stay incremental across machine restarts.
 FROM rust:1-slim-trixie
 
+# The image's toolchain is rustup's minimal profile.
+RUN rustup component add clippy
+
 # sshd listens on 2222: port 22 belongs to Fly's own SSH server (`fly ssh console`).
 RUN apt-get update \
  && apt-get install -y --no-install-recommends openssh-server rsync iproute2 pkg-config \

@@ -2,7 +2,7 @@
 //! of us. `UiHost` for ordinary commands, `SetupHost` for `cargo plane setup`.
 
 use std::cell::{Cell, RefCell, RefMut};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use anyhow::{Context, Result, bail};
@@ -12,6 +12,35 @@ use serde_json::Value;
 use crate::config::{self, Config, PROJECT_FILE};
 use crate::remote::{Conn, Remote};
 use crate::ui;
+
+/// Add the project's plane.toml to the `.gitignore` next to it: what `setup`
+/// creates belongs to whoever ran it. `.cargo/config.toml` stays tracked.
+fn ignore_in_git(path: &Path) -> Result<()> {
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name().and_then(|n| n.to_str())) else {
+        return Ok(());
+    };
+    let gitignore = dir.join(".gitignore");
+    let mut text = std::fs::read_to_string(&gitignore).unwrap_or_default();
+    if text
+        .lines()
+        .any(|line| line.trim().trim_start_matches('/') == name)
+    {
+        return Ok(());
+    }
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text += &format!("{name}\n");
+    std::fs::write(&gitignore, text).with_context(|| format!("writing {}", gitignore.display()))?;
+    ui::status(
+        "Ignored",
+        format!(
+            "{name} in {} (remove it there to share the remote with your team)",
+            gitignore.display()
+        ),
+    );
+    Ok(())
+}
 
 /// The terminal, and nothing else.
 pub struct UiHost;
@@ -155,15 +184,15 @@ impl Host for SetupHost {
                 format!("remote `{}` in {} (unchanged)", self.remote, path.display()),
             );
         } else {
+            let created = !path.exists();
             config::write_remote(&path, &self.remote, &merged)?;
             ui::status(
                 "Configured",
-                format!(
-                    "remote `{}` in {} (gitignore it if the remote is just yours)",
-                    self.remote,
-                    path.display()
-                ),
+                format!("remote `{}` in {}", self.remote, path.display()),
             );
+            if created {
+                ignore_in_git(&path)?;
+            }
         }
         self.saved.set(true);
         // Reconnect with the new config next time.
@@ -193,5 +222,26 @@ impl Host for SetupHost {
                 ..RemoteOutput::default()
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ignores_plane_toml_once() {
+        let dir = std::env::temp_dir().join(format!("cargo-plane-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let gitignore = dir.join(".gitignore");
+        std::fs::write(&gitignore, "target").unwrap();
+        let plane = dir.join("plane.toml");
+        ignore_in_git(&plane).unwrap();
+        ignore_in_git(&plane).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&gitignore).unwrap(),
+            "target\nplane.toml\n"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
