@@ -7,10 +7,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
+use cargo_plane_provider::Host;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
-
-use crate::{ui, util};
 
 /// Metadata marking the machine cargo-plane builds on.
 pub const METADATA_KEY: &str = "cargo-plane";
@@ -144,16 +143,12 @@ fn join<S: AsRef<str>>(args: &[S]) -> String {
 
 /// `$XDG_DATA_HOME/cargo-plane/bin`, falling back to `~/.local/share/cargo-plane/bin`.
 pub fn install_dir() -> Result<PathBuf> {
-    let base = match std::env::var_os("XDG_DATA_HOME").filter(|v| !v.is_empty()) {
-        Some(dir) => PathBuf::from(dir),
-        None => util::home_dir()?.join(".local/share"),
-    };
-    Ok(base.join("cargo-plane").join("bin"))
+    Ok(cargo_plane_provider::data_dir()?.join("bin"))
 }
 
 /// Download the latest flyctl release from GitHub, verify it against the
 /// release's checksums and install it to our own bin dir.
-pub fn install() -> Result<Flyctl> {
+pub fn install(host: &dyn Host) -> Result<Flyctl> {
     let platform = match (std::env::consts::OS, std::env::consts::ARCH) {
         ("linux", "x86_64") => "Linux_x86_64",
         ("linux", "aarch64") => "Linux_arm64",
@@ -179,11 +174,11 @@ pub fn install() -> Result<Flyctl> {
     );
     let archive = format!("flyctl_{version}_{platform}.tar.gz");
 
-    let work = util::cache_dir()?.join("flyctl-download");
+    let work = cargo_plane_provider::cache_dir()?.join("flyctl-download");
     let _ = fs::remove_dir_all(&work);
     fs::create_dir_all(&work)?;
 
-    ui::status("Downloading", format!("flyctl {version} ({platform})"));
+    host.status("Downloading", &format!("flyctl {version} ({platform})"));
     let checksums = String::from_utf8(curl(&[&format!("{base}/flyctl_{version}_checksums.txt")])?)?;
     let expected = checksums
         .lines()
@@ -203,7 +198,7 @@ pub fn install() -> Result<Flyctl> {
     if actual != expected {
         bail!("checksum mismatch for {archive}: expected {expected}, got {actual}");
     }
-    ui::status("Verified", "sha256 checksum");
+    host.status("Verified", "sha256 checksum");
 
     let status = Command::new("tar")
         .args(["-xzf", &archive, "flyctl"])
@@ -221,7 +216,7 @@ pub fn install() -> Result<Flyctl> {
         .or_else(|_| fs::copy(work.join("flyctl"), &bin).map(drop))?;
     fs::set_permissions(&bin, fs::Permissions::from_mode(0o755))?;
     let _ = fs::remove_dir_all(&work);
-    ui::status("Installed", bin.display());
+    host.status("Installed", &bin.display().to_string());
     Ok(Flyctl { bin })
 }
 

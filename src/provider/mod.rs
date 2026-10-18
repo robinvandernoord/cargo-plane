@@ -1,74 +1,49 @@
 //! Providers manage a remote machine's lifecycle and say how to reach it.
 //! Everything else (sync, running cargo, fetching artifacts) is shared.
+//!
+//! Built-in providers implement `cargo_plane_provider::Provider` like plugins
+//! do; a provider that isn't built in is looked up as a plugin binary.
 
 mod codespace;
 mod fly;
+mod plugin;
 mod ssh;
 
-use std::collections::BTreeMap;
-use std::time::Duration;
-
 use anyhow::{Result, bail};
-use serde::{Deserialize, Serialize};
+pub use cargo_plane_provider::{AnyProvider, Endpoint};
 
-use crate::config::RemoteConfig;
-
-pub use codespace::setup as setup_codespace;
-pub use fly::setup as setup_fly;
-
-/// How to reach a running remote over SSH.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Endpoint {
-    pub host: String,
-    #[serde(default)]
-    pub user: Option<String>,
-    #[serde(default)]
-    pub port: Option<u16>,
-    /// Extra arguments for `ssh`, e.g. `["-o", "HostKeyAlias=..."]`.
-    #[serde(default)]
-    pub ssh_options: Vec<String>,
-    /// Base directory for synced projects: absolute, or relative to the remote `$HOME`.
-    #[serde(default)]
-    pub remote_dir: Option<String>,
-    /// Environment for remote cargo invocations.
-    #[serde(default)]
-    pub env: BTreeMap<String, String>,
-    /// Shell lines run before every remote command, e.g. to find the toolchain.
-    #[serde(default)]
-    pub prelude: Option<String>,
+struct Builtin {
+    name: &'static str,
+    make: fn() -> Box<dyn AnyProvider>,
 }
 
-pub trait Provider {
-    /// Make sure the remote is running and return how to reach it.
-    /// May be slow (booting a machine); the result is cached between runs.
-    fn up(&self) -> Result<Endpoint>;
+const BUILTINS: &[Builtin] = &[
+    Builtin {
+        name: "ssh",
+        make: || Box::new(ssh::Ssh),
+    },
+    Builtin {
+        name: "fly",
+        make: || Box::new(fly::Fly),
+    },
+    Builtin {
+        name: "codespace",
+        make: || Box::new(codespace::Codespace),
+    },
+];
 
-    /// Stop, suspend or destroy the remote.
-    fn down(&self) -> Result<()>;
-
-    /// Human-readable state of the remote.
-    fn status(&self) -> Result<String>;
-
-    /// Permanently delete everything the provider created, after asking.
-    /// Returns `false` if the user backed out.
-    fn purge(&self) -> Result<bool> {
-        bail!("this provider doesn't create anything, so there's nothing to purge")
+/// The built-in provider called `name`, or else the plugin binary for it.
+pub fn lookup(name: &str) -> Result<Box<dyn AnyProvider>> {
+    if let Some(builtin) = BUILTINS.iter().find(|b| b.name == name) {
+        return Ok((builtin.make)());
     }
-
-    /// How long SSH may take to come up after `up()` returns.
-    fn boot_timeout(&self) -> Duration {
-        Duration::ZERO
+    if let Some(plugin) = plugin::Plugin::locate(name) {
+        return Ok(Box::new(plugin));
     }
-}
-
-pub fn from_config(remote: &RemoteConfig) -> Result<Box<dyn Provider>> {
-    Ok(match remote.provider.as_str() {
-        "ssh" => Box::new(ssh::Ssh::new(remote.provider_config()?)),
-        "fly" => Box::new(fly::Fly::new(remote.provider_config()?)),
-        "codespace" => Box::new(codespace::Codespace::new(remote.provider_config()?)),
-        other => bail!(
-            "unknown provider `{other}` for remote `{}` (available: ssh, fly, codespace)",
-            remote.name
-        ),
-    })
+    let builtins: Vec<_> = BUILTINS.iter().map(|b| b.name).collect();
+    bail!(
+        "unknown provider `{name}`: it isn't built in ({}) and there's no `{}` on PATH",
+        builtins.join(", "),
+        plugin::binary_name(name)
+    )
 }

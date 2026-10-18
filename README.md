@@ -96,6 +96,58 @@ your slowest build. Stopped codespaces are deleted after their retention
 period (30 days by default); run setup again to get a new one.
 `cargo plane purge codespace` deletes it right away.
 
+### Provider plugins
+
+Any other provider can be a plugin: a binary named `cargo-plane-provider-<name>`
+on your PATH. A remote with `provider = "<name>"` uses it, and
+`cargo plane setup <name>` runs its setup, if it has one.
+
+```sh
+cargo install --path crates/cargo-plane-provider-wol   # Wake-on-LAN, in this repo
+cargo plane setup wol
+```
+
+Plugins are written in Rust against the
+[`cargo-plane-provider`](crates/cargo-plane-provider) crate. Implement its
+`Provider` trait and hand it to `run`:
+
+```rust
+use cargo_plane_provider::{Endpoint, Host, Provider, run};
+
+#[derive(serde::Deserialize)]
+struct Config { host: String }
+
+struct MyProvider;
+
+impl Provider for MyProvider {
+    type Config = Config;   // the remote's table from .cargo/plane.toml
+
+    fn up(&self, config: &Config, host: &dyn Host) -> anyhow::Result<Endpoint> {
+        host.status("Starting", &config.host);
+        // start the machine...
+        Ok(Endpoint::new(&config.host))
+    }
+    fn down(&self, config: &Config, host: &dyn Host) -> anyhow::Result<()> { todo!() }
+    fn status(&self, config: &Config, host: &dyn Host) -> anyhow::Result<String> { todo!() }
+    // optional: purge, boot_timeout, setup
+}
+
+fn main() -> std::process::ExitCode {
+    run(MyProvider)
+}
+```
+
+cargo-plane starts the plugin the first time a command needs the provider (not
+on every build: the endpoint is cached) and talks to it over a Unix socket. The
+plugin keeps the terminal, so tools it runs can prompt as usual. Questions and
+status lines go through `Host`, so they look like the rest of cargo-plane.
+During setup, `Host` can also save the remote's config and run commands on it.
+The built-in providers implement the same trait; see
+[`crates/cargo-plane-provider-wol`](crates/cargo-plane-provider-wol/src/main.rs)
+for a complete plugin.
+
+Plugins run with your permissions, like any program you install.
+
 ## Commands
 
 Every cargo command runs remotely as-is, except:
@@ -108,6 +160,7 @@ Every cargo command runs remotely as-is, except:
 | `takeoff` / `land`          | Start / stop the remote                                          |
 | `setup fly`                 | Create a Fly.io build machine and configure it as a remote       |
 | `setup codespace`           | Create or pick a GitHub Codespace and configure it as a remote   |
+| `setup <plugin>`            | Run a provider plugin's setup                                    |
 | `purge`                     | Permanently delete what `setup` created (asks you to type the name) |
 | `status`                    | Show the remote's state                                          |
 

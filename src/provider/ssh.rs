@@ -1,9 +1,8 @@
 //! A machine that's always on and reachable over SSH: a VPS, a desktop at home.
 
 use anyhow::Result;
+use cargo_plane_provider::{Endpoint, Host, Provider};
 use serde::Deserialize;
-
-use super::{Endpoint, Provider};
 
 #[derive(Deserialize)]
 pub struct Config {
@@ -13,32 +12,24 @@ pub struct Config {
     port: Option<u16>,
 }
 
-pub struct Ssh(Config);
-
-impl Ssh {
-    pub fn new(config: Config) -> Self {
-        Self(config)
-    }
-}
+pub struct Ssh;
 
 impl Provider for Ssh {
-    fn up(&self) -> Result<Endpoint> {
+    type Config = Config;
+
+    fn up(&self, config: &Config, _: &dyn Host) -> Result<Endpoint> {
         Ok(Endpoint {
-            host: self.0.host.clone(),
-            user: self.0.user.clone(),
-            port: self.0.port,
-            ssh_options: Vec::new(),
-            remote_dir: None,
-            env: Default::default(),
-            prelude: None,
+            user: config.user.clone(),
+            port: config.port,
+            ..Endpoint::new(&config.host)
         })
     }
 
-    fn down(&self) -> Result<()> {
+    fn down(&self, _: &Config, _: &dyn Host) -> Result<()> {
         Ok(())
     }
 
-    fn status(&self) -> Result<String> {
-        Ok(format!("static SSH host `{}`", self.0.host))
+    fn status(&self, config: &Config, _: &dyn Host) -> Result<String> {
+        Ok(format!("static SSH host `{}`", config.host))
     }
 }

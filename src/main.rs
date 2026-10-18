@@ -1,6 +1,7 @@
 mod artifacts;
 mod cargo_args;
 mod config;
+mod host;
 mod output;
 mod project;
 mod provider;
@@ -16,7 +17,8 @@ use anyhow::{Context, Result, bail};
 
 use crate::artifacts::Artifact;
 use crate::cargo_args::{Invocation, Selector};
-use crate::config::Config;
+use crate::config::{Config, PROJECT_FILE};
+use crate::host::SetupHost;
 use crate::project::{Project, Stdout};
 use crate::remote::{Conn, Remote};
 
@@ -27,7 +29,7 @@ Cargo, but in the cloud(s): run cargo on a remote machine.
 
 Usage: cargo plane [--remote <name>] <cargo command> [args...]
        cargo plane takeoff | land | status | purge [<remote>]
-       cargo plane [--remote <name>] setup fly | codespace [--help]
+       cargo plane [--remote <name>] setup <provider> [--help]
 
 Any cargo command works and runs remotely, with these differences:
   build              also copies binaries and cdylibs/staticlibs back
@@ -37,6 +39,7 @@ Any cargo command works and runs remotely, with these differences:
 Setup:
   setup fly         install flyctl, log in and create a Fly.io build machine
   setup codespace   create a GitHub Codespace (or pick one) to build on
+  setup <name>      set up a remote with the `cargo-plane-provider-<name>` plugin
 
 Lifecycle:
   takeoff   start the remote and connect
@@ -98,18 +101,11 @@ fn run() -> Result<ExitCode> {
     }
 
     if args[0] == "setup" {
-        return match args.get(1).map(String::as_str) {
-            Some("fly") => {
-                provider::setup_fly(remote_name.as_deref(), &args[2..])?;
-                Ok(ExitCode::SUCCESS)
-            }
-            Some("codespace") => {
-                provider::setup_codespace(remote_name.as_deref(), &args[2..])?;
-                Ok(ExitCode::SUCCESS)
-            }
-            Some(other) => bail!("no setup for `{other}` (available: fly, codespace)"),
-            None => bail!("usage: cargo plane setup <provider> (available: fly, codespace)"),
+        let Some(provider) = args.get(1) else {
+            bail!("usage: cargo plane setup <provider> (built in: fly, codespace)");
         };
+        setup(provider, remote_name.as_deref(), &args[2..])?;
+        return Ok(ExitCode::SUCCESS);
     }
 
     // Lifecycle commands take the remote as an optional argument too:
@@ -164,6 +160,39 @@ fn run() -> Result<ExitCode> {
         }
         _ => cargo(&remote, args),
     }
+}
+
+/// `cargo plane setup <provider>`: the provider creates what it needs and
+/// saves the remote's config; then we check that cargo runs there.
+fn setup(provider_name: &str, remote_name: Option<&str>, args: &[String]) -> Result<()> {
+    let provider = provider::lookup(provider_name)?;
+    let remote = remote_name.unwrap_or(provider_name);
+    let project_dir = project::workspace_root(None).ok();
+    let existing = match &project_dir {
+        Some(dir) => config::project_remote(&dir.join(PROJECT_FILE), remote)?,
+        None => None,
+    };
+    if let Some(table) = &existing {
+        let configured = table
+            .get("provider")
+            .and_then(toml::Value::as_str)
+            .unwrap_or(remote);
+        if configured != provider_name {
+            bail!(
+                "remote `{remote}` already uses provider `{configured}`; pick another name \
+                 with `cargo plane --remote <name> setup {provider_name}`"
+            );
+        }
+    }
+    let setup = cargo_plane_provider::Setup {
+        remote: remote.into(),
+        project_dir: project_dir.clone(),
+        config: existing.map(serde_json::to_value).transpose()?,
+        args: args.to_vec(),
+    };
+    let host = SetupHost::new(remote, provider_name, project_dir);
+    provider.setup(&setup, &host)?;
+    host.finish()
 }
 
 fn cargo(remote: &Remote, args: Vec<String>) -> Result<ExitCode> {

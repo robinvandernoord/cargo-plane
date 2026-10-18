@@ -8,14 +8,13 @@
 mod gh;
 mod setup;
 
+use std::time::Duration;
+
 use anyhow::{Context, Result, bail};
+use cargo_plane_provider::{Endpoint, Host, Provider, Setup};
 use serde::Deserialize;
 
 use self::gh::Gh;
-use super::{Endpoint, Provider};
-use crate::ui;
-
-pub use setup::setup;
 
 #[derive(Deserialize)]
 pub struct Config {
@@ -23,6 +22,12 @@ pub struct Config {
     codespace: String,
     /// Path to gh; found on PATH when unset.
     gh: Option<String>,
+}
+
+impl Config {
+    fn gh(&self) -> Result<Gh> {
+        Gh::require(self.gh.as_deref())
+    }
 }
 
 /// On the persistent disk, next to the repository checkout.
@@ -48,61 +53,51 @@ const OWN_OPTIONS: &[&str] = &[
     "controlpersist",
 ];
 
-pub struct Codespace(Config);
-
-impl Codespace {
-    pub fn new(config: Config) -> Self {
-        Self(config)
-    }
-
-    fn gh(&self) -> Result<Gh> {
-        Gh::require(self.0.gh.as_deref())
-    }
-}
+pub struct Codespace;
 
 impl Provider for Codespace {
-    fn up(&self) -> Result<Endpoint> {
-        let gh = self.gh()?;
-        let name = &self.0.codespace;
+    type Config = Config;
+
+    fn up(&self, config: &Config, host: &dyn Host) -> Result<Endpoint> {
+        let gh = config.gh()?;
+        let name = &config.codespace;
         let codespace = gh.codespace(name)?;
         if codespace.state != "Available" {
-            ui::status(
+            host.status(
                 "Starting",
-                format!("codespace {name} ({})", codespace.state),
+                &format!("codespace {name} ({})", codespace.state),
             );
         }
         // Starts the codespace and waits for it, then asks it for the SSH user.
-        let config = gh
+        let ssh_config = gh
             .output(&["codespace", "ssh", "--config", "-c", name])
             .with_context(|| format!("can't get SSH settings for codespace `{name}`"))?;
-        let (user, ssh_options) = parse_ssh_config(&config)?;
+        let (user, ssh_options) = parse_ssh_config(&ssh_config)?;
 
         Ok(Endpoint {
-            host: format!("cs.{name}"),
             user: Some(user),
-            port: None,
             ssh_options,
             remote_dir: Some(REMOTE_DIR.into()),
-            env: Default::default(),
             prelude: Some(PRELUDE.into()),
+            ..Endpoint::new(format!("cs.{name}"))
         })
     }
 
-    fn down(&self) -> Result<()> {
-        let gh = self.gh()?;
-        let name = &self.0.codespace;
+    fn down(&self, config: &Config, host: &dyn Host) -> Result<()> {
+        let gh = config.gh()?;
+        let name = &config.codespace;
         if !matches!(
             gh.codespace(name)?.state.as_str(),
             "Shutdown" | "ShuttingDown"
         ) {
-            ui::status("Stopping", format!("codespace {name}"));
+            host.status("Stopping", &format!("codespace {name}"));
             gh.output(&["codespace", "stop", "-c", name])?;
         }
         Ok(())
     }
 
-    fn status(&self) -> Result<String> {
-        let cs = self.gh()?.codespace(&self.0.codespace)?;
+    fn status(&self, config: &Config, _: &dyn Host) -> Result<String> {
+        let cs = config.gh()?.codespace(&config.codespace)?;
         let label = if cs.display_name.is_empty() {
             cs.name
         } else {
@@ -114,16 +109,16 @@ impl Provider for Codespace {
         ))
     }
 
-    fn purge(&self) -> Result<bool> {
-        if !ui::interactive() {
+    fn purge(&self, config: &Config, host: &dyn Host) -> Result<bool> {
+        if !host.interactive() {
             bail!("`cargo plane purge` asks for confirmation; run it in a terminal");
         }
-        let gh = self.gh()?;
-        let name = &self.0.codespace;
+        let gh = config.gh()?;
+        let name = &config.codespace;
         if !gh.exists(name)? {
-            ui::status(
+            host.status(
                 "Gone",
-                format!("codespace `{name}` doesn't exist (anymore)"),
+                &format!("codespace `{name}` doesn't exist (anymore)"),
             );
             return Ok(true);
         }
@@ -133,18 +128,22 @@ impl Provider for Codespace {
              caches and anything in it that isn't pushed.",
             cs.repository, cs.state
         );
-        if ui::ask("Type the codespace name to confirm", None)? != *name {
+        if host.ask("Type the codespace name to confirm", None)? != *name {
             return Ok(false);
         }
-        ui::status("Deleting", format!("codespace {name}"));
+        host.status("Deleting", &format!("codespace {name}"));
         // Without --force, gh asks again if there are unpushed changes.
         gh.interactive(&["codespace", "delete", "-c", name])?;
         Ok(true)
     }
 
-    fn boot_timeout(&self) -> std::time::Duration {
+    fn boot_timeout(&self, _: &Config) -> Duration {
         // `up()` waits for the codespace, but its sshd starts on first connect.
-        std::time::Duration::from_secs(60)
+        Duration::from_secs(60)
+    }
+
+    fn setup(&self, setup: &Setup, host: &dyn Host) -> Result<()> {
+        setup::setup(setup, host)
     }
 }
 

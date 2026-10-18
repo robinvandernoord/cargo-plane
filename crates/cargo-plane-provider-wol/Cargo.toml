@@ -1,0 +1,13 @@
+[package]
+name = "cargo-plane-provider-wol"
+version = "0.1.0"
+edition = "2024"
+description = "cargo-plane provider plugin: wake a machine with Wake-on-LAN, suspend it when you land"
+license = "MIT"
+publish = false
+
+[dependencies]
+cargo-plane-provider = { version = "0.1.0", path = "../cargo-plane-provider" }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

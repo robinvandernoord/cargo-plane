@@ -19,10 +19,30 @@ name = "cargo-plane"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "cargo-plane-provider",
  "serde",
  "serde_json",
  "terminal_size",
  "toml",
+]
+
+[[package]]
+name = "cargo-plane-provider"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "cargo-plane-provider-wol"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cargo-plane-provider",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

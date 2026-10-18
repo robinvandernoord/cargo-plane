@@ -3,19 +3,15 @@
 //! make sure it has what cargo-plane needs.
 
 use std::collections::BTreeSet;
-use std::fs;
-use std::io::Write;
 use std::path::Path;
 use std::process::Stdio;
 
 use anyhow::{Context, Result, bail};
+use cargo_plane_provider::{Host, Setup};
 use serde::Deserialize;
+use serde_json::{Value, json};
 
 use super::gh::Gh;
-use crate::config::{Config, PROJECT_FILE};
-use crate::project::workspace_root;
-use crate::remote::{Conn, Remote};
-use crate::ui;
 
 const USAGE: &str = "\
 Usage: cargo plane [--remote <name>] setup codespace
@@ -31,8 +27,8 @@ to install what's missing. Safe to rerun. Delete the codespace with
 /// GitHub's own default; the maximum is 240.
 const DEFAULT_IDLE_MINUTES: u32 = 30;
 
-pub fn setup(remote_name: Option<&str>, args: &[String]) -> Result<()> {
-    match args {
+pub fn setup(setup: &Setup, host: &dyn Host) -> Result<()> {
+    match setup.args.as_slice() {
         [] => {}
         [help] if help == "-h" || help == "--help" => {
             print!("{USAGE}");
@@ -40,46 +36,49 @@ pub fn setup(remote_name: Option<&str>, args: &[String]) -> Result<()> {
         }
         [other, ..] => bail!("unknown option `{other}` for `setup codespace`\n\n{USAGE}"),
     }
-    if !ui::interactive() {
+    if !host.interactive() {
         bail!("`cargo plane setup codespace` asks questions; run it in a terminal");
     }
-    let remote_name = remote_name.unwrap_or("codespace");
+    let remote = &setup.remote;
 
     let gh = Gh::locate(None).context(
         "cargo-plane manages codespaces through the GitHub CLI; install `gh` \
          (https://cli.github.com) and rerun",
     )?;
-    ui::status("Found", format!("gh at {}", gh.path().display()));
+    host.status("Found", &format!("gh at {}", gh.path().display()));
     ensure_login(&gh)?;
 
-    let root = workspace_root(None)
+    let root = setup
+        .project_dir
+        .as_ref()
         .context("run `cargo plane setup codespace` inside the project you want a codespace for")?;
-    let config_path = root.join(PROJECT_FILE);
+    let configured = setup
+        .config
+        .as_ref()
+        .and_then(|c| c.get("codespace"))
+        .and_then(Value::as_str);
 
-    match configured_codespace(&config_path, remote_name)? {
-        Some(name) if gh.codespace(&name).is_ok() => {
-            ui::status(
-                "Found",
-                format!("codespace {name} for remote `{remote_name}`"),
-            );
+    let name = match configured {
+        Some(name) if gh.codespace(name).is_ok() => {
+            host.status("Found", &format!("codespace {name} for remote `{remote}`"));
+            name.to_owned()
         }
         configured => {
             if let Some(name) = configured {
-                ui::warn(format!(
-                    "codespace `{name}` for remote `{remote_name}` doesn't exist anymore"
+                host.warn(&format!(
+                    "codespace `{name}` for remote `{remote}` doesn't exist anymore"
                 ));
-                crate::config::remove_remote(remote_name)?;
             }
             let project = root
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("project");
-            let name = pick_or_create(&gh, &root, project)?;
-            write_config(&config_path, remote_name, &name)?;
+            pick_or_create(&gh, host, root, project)?
         }
-    }
+    };
+    host.save_config(&json!({ "codespace": name }))?;
 
-    provision(remote_name)
+    provision(host)
 }
 
 fn ensure_login(gh: &Gh) -> Result<()> {
@@ -117,7 +116,7 @@ fn ensure_login(gh: &Gh) -> Result<()> {
 }
 
 /// The name of an existing codespace the user picks, or of a new one.
-fn pick_or_create(gh: &Gh, root: &Path, project: &str) -> Result<String> {
+fn pick_or_create(gh: &Gh, host: &dyn Host, root: &Path, project: &str) -> Result<String> {
     let default_repo = gh
         .command(&[
             "repo",
@@ -135,7 +134,7 @@ fn pick_or_create(gh: &Gh, root: &Path, project: &str) -> Result<String> {
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
         .filter(|r| !r.is_empty());
-    let repo = ui::ask(
+    let repo = host.ask(
         "Repository to create the codespace from (owner/repo)",
         default_repo.as_deref(),
     )?;
@@ -155,24 +154,24 @@ fn pick_or_create(gh: &Gh, root: &Path, project: &str) -> Result<String> {
         }
         eprintln!("  n) create a new one");
         loop {
-            let answer = ui::ask("Codespace to build on", Some("n"))?;
+            let answer = host.ask("Codespace to build on", Some("n"))?;
             if answer == "n" {
                 break;
             }
             match answer.parse::<usize>() {
                 Ok(n) if (1..=existing.len()).contains(&n) => {
-                    ui::warn(
+                    host.warn(
                         "`cargo plane purge` deletes the whole codespace, including your \
                          work in it; only use it on one you can throw away",
                     );
                     return Ok(existing[n - 1].name.clone());
                 }
-                _ => ui::warn(format!("pick a number from 1 to {}, or n", existing.len())),
+                _ => host.warn(&format!("pick a number from 1 to {}, or n", existing.len())),
             }
         }
     }
 
-    create(gh, &repo, project)
+    create(gh, host, &repo, project)
 }
 
 #[derive(Deserialize)]
@@ -191,7 +190,7 @@ struct Machine {
     storage_in_bytes: u64,
 }
 
-fn create(gh: &Gh, repo: &str, project: &str) -> Result<String> {
+fn create(gh: &Gh, host: &dyn Host, repo: &str, project: &str) -> Result<String> {
     let mut machines = gh
         .json::<Machines, _>(&["api", &format!("repos/{repo}/codespaces/machines")])
         .map(|m| m.machines)
@@ -216,24 +215,25 @@ fn create(gh: &Gh, repo: &str, project: &str) -> Result<String> {
         .or(machines.last())
         .map(|m| m.name.as_str());
     let machine = loop {
-        let name = ui::ask(
+        let name = host.ask(
             "Machine type (more CPUs build faster, use up your quota faster)",
             default_machine,
         )?;
         if machines.is_empty() || machines.iter().any(|m| m.name == name) {
             break name;
         }
-        ui::warn(format!("unknown machine type `{name}`"));
+        host.warn(&format!("unknown machine type `{name}`"));
     };
     let idle_minutes = loop {
-        match ui::ask(
-            "Stop the codespace after how many idle minutes (5-240)",
-            Some(&DEFAULT_IDLE_MINUTES.to_string()),
-        )?
-        .parse::<u32>()
+        match host
+            .ask(
+                "Stop the codespace after how many idle minutes (5-240)",
+                Some(&DEFAULT_IDLE_MINUTES.to_string()),
+            )?
+            .parse::<u32>()
         {
             Ok(n) if (5..=240).contains(&n) => break n,
-            _ => ui::warn("enter a number from 5 to 240"),
+            _ => host.warn("enter a number from 5 to 240"),
         }
     };
     let display_name: String = format!("cargo-plane {project}").chars().take(48).collect();
@@ -251,16 +251,16 @@ fn create(gh: &Gh, repo: &str, project: &str) -> Result<String> {
     eprintln!("  Personal accounts get a monthly allowance of both for free. GitHub deletes");
     eprintln!("  stopped codespaces after their retention period (30 days by default).");
     eprintln!("Delete it earlier with `cargo plane purge`.");
-    if !ui::confirm("Create this codespace?", false)? {
+    if !host.confirm("Create this codespace?", false)? {
         bail!("aborted");
     }
 
     // gh may ask questions (which dev container to use), so let it talk to
     // the terminal and find the new codespace afterwards.
     let before: BTreeSet<String> = gh.codespaces(repo)?.into_iter().map(|c| c.name).collect();
-    ui::status(
+    host.status(
         "Creating",
-        format!("codespace for {repo} (takes a minute or two)"),
+        &format!("codespace for {repo} (takes a minute or two)"),
     );
     gh.interactive(&[
         "codespace",
@@ -284,126 +284,60 @@ fn create(gh: &Gh, repo: &str, project: &str) -> Result<String> {
     match new.as_slice() {
         [name] => Ok(name.clone()),
         _ => bail!(
-            "can't tell which codespace was just created; add it to {PROJECT_FILE} yourself \
+            "can't tell which codespace was just created; add it to .cargo/plane.toml yourself \
              (`provider = \"codespace\"`, `codespace = \"<name from gh codespace list>\"`)"
         ),
     }
 }
 
-fn write_config(path: &Path, name: &str, codespace: &str) -> Result<()> {
-    let snippet =
-        format!("\n[remotes.{name}]\nprovider = \"codespace\"\ncodespace = \"{codespace}\"\n");
-    fs::create_dir_all(path.parent().unwrap())?;
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?;
-    file.write_all(snippet.as_bytes())?;
-    ui::status(
-        "Configured",
-        format!(
-            "remote `{name}` in {} (gitignore it if the codespace is just yours)",
-            path.display()
-        ),
-    );
-    Ok(())
-}
-
-/// Connect, and install what's missing for cargo-plane after asking.
-fn provision(name: &str) -> Result<()> {
-    let config = Config::load(&std::env::current_dir()?)?;
-    let remote = Remote::new(config.select(Some(name))?)?;
-    let conn = remote.takeoff()?;
-
-    let missing = missing_tools(&conn)?;
-    if missing.iter().any(|t| t == "rsync" || t == "cc") {
+/// Install what's missing for cargo-plane, after asking.
+fn provision(host: &dyn Host) -> Result<()> {
+    let missing = host.run_remote(
+        "for t in rsync cc cargo; do command -v $t >/dev/null 2>&1 || echo $t; done",
+        true,
+    )?;
+    if !missing.success {
+        bail!(
+            "checking the codespace's tools failed: {}",
+            missing.stderr.trim()
+        );
+    }
+    let missing: Vec<&str> = missing.stdout.split_whitespace().collect();
+    if missing.iter().any(|t| *t == "rsync" || *t == "cc") {
         let question = "The codespace lacks rsync or a C compiler. Install rsync and \
                         build-essential with apt-get?";
-        if !ui::confirm(question, true)? {
+        if !host.confirm(question, true)? {
             bail!("cargo-plane needs rsync and a C compiler on the codespace");
         }
         run(
-            &conn,
+            host,
             "sudo apt-get update && \
              sudo DEBIAN_FRONTEND=noninteractive apt-get install -y rsync build-essential",
         )?;
     }
-    if missing.iter().any(|t| t == "cargo") {
+    if missing.contains(&"cargo") {
         let question = "The codespace has no Rust toolchain. Install one with rustup into \
                         its home directory? (A rebuild of the codespace removes it; add the \
                         `rust` dev container feature to keep it.)";
-        if !ui::confirm(question, true)? {
+        if !host.confirm(question, true)? {
             bail!("cargo-plane needs cargo on the codespace");
         }
         run(
-            &conn,
+            host,
             "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
              sh -s -- -y --profile minimal",
         )?;
     }
-
-    let output = conn
-        .shell("cargo --version")?
-        .stdin(Stdio::null())
-        .output()?;
-    if !output.status.success() {
-        bail!(
-            "connected, but `cargo --version` failed on the codespace ({}): {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    ui::status(
-        "Ready",
-        format!(
-            "{} on remote `{name}`; try `cargo plane --remote {name} check`",
-            String::from_utf8_lossy(&output.stdout).trim()
-        ),
-    );
     Ok(())
 }
 
-fn missing_tools(conn: &Conn) -> Result<Vec<String>> {
-    let output = conn
-        .shell("for t in rsync cc cargo; do command -v $t >/dev/null 2>&1 || echo $t; done")?
-        .stdin(Stdio::null())
-        .output()?;
-    if !output.status.success() {
+fn run(host: &dyn Host, command: &str) -> Result<()> {
+    let output = host.run_remote(command, false)?;
+    if !output.success {
         bail!(
-            "checking the codespace's tools failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
+            "`{command}` failed on the codespace (exit code {:?})",
+            output.code
         );
     }
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .split_whitespace()
-        .map(str::to_owned)
-        .collect())
-}
-
-fn run(conn: &Conn, command: &str) -> Result<()> {
-    let status = conn.shell(command)?.stdin(Stdio::null()).status()?;
-    if !status.success() {
-        bail!("`{command}` failed on the codespace ({status})");
-    }
     Ok(())
-}
-
-/// The codespace this project's config already uses for `name`, if any.
-fn configured_codespace(path: &Path, name: &str) -> Result<Option<String>> {
-    let Ok(text) = fs::read_to_string(path) else {
-        return Ok(None);
-    };
-    let table: toml::Table =
-        toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
-    let Some(remote) = table.get("remotes").and_then(|r| r.get(name)) else {
-        return Ok(None);
-    };
-    match remote.get("codespace").and_then(toml::Value::as_str) {
-        Some(codespace) => Ok(Some(codespace.to_owned())),
-        None => bail!(
-            "remote `{name}` in {} isn't a codespace; pick another name with \
-             `cargo plane --remote <name> setup codespace`",
-            path.display()
-        ),
-    }
 }
