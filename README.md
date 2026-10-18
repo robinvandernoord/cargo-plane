@@ -18,12 +18,50 @@ cargo plane run -- --my-flag   # built remotely, runs locally
 
 ## Install
 
+With [cargo-binstall](https://github.com/cargo-bins/cargo-binstall) installed,
+download a prebuilt binary:
+
+```sh
+cargo binstall cargo-plane
+```
+
+Release binaries include the SSH, Fly.io and Codespaces providers and are built
+for Linux and macOS on x86_64 and ARM64. Linux binaries require glibc 2.35 or
+newer (for example, Ubuntu 22.04). macOS binaries require macOS 15 or newer.
+
+To build from source instead:
+
 ```sh
 cargo install cargo-plane
 ```
 
 Locally you need `ssh` and `rsync`. The remote needs `rsync`, a C linker
 and a Rust toolchain (rustup's `~/.cargo/env` is sourced automatically).
+
+### Releasing binaries
+
+The `Release binaries` workflow builds archives when a `v<version>` tag is
+pushed. The tag must match the version in `Cargo.toml`. After all four builds
+succeed, the workflow attaches the archives to a GitHub release. Each archive
+contains `cargo-plane`, `LICENSE` and `README.md`; the providers are compiled in.
+The workflow does not publish crates to crates.io.
+
+For the first release with binstall support, publish a new crate version that
+includes the repository URL and binstall metadata. Publish any updated provider
+dependencies before `cargo-plane`, and release the matching tag. Previously
+published crate versions do not receive manifest changes.
+
+You can also run the workflow manually from GitHub Actions to check all four
+builds and download their archives without publishing a release. After both the
+crate and its release assets are published, verify installation with:
+
+```sh
+cargo binstall cargo-plane --version <version> --strategies crate-meta-data
+cargo plane --version
+```
+
+This checks the project's release assets without falling back to a source build
+or third-party binaries.
 
 ## Configure
 
