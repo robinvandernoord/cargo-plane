@@ -1,5 +1,5 @@
 //! A Fly.io Machine with a volume for `target/` and the cargo registry.
-//! Started on demand; it stops itself when idle (see `contrib/fly`).
+//! Started on demand; it stops itself when idle (see `image/`).
 //! `cargo plane setup fly` creates everything.
 //!
 //! Unless `ssh_host` is set (e.g. via WireGuard: `<machine>.vm.<app>.internal`),
@@ -39,7 +39,7 @@ fn default_user() -> String {
     "root".into()
 }
 
-/// Paths used by the image in `contrib/fly`.
+/// Paths used by the image in `image/`.
 const DATA_DIR: &str = "/data";
 /// Our sshd's port; Fly's own SSH server (for `fly ssh console`) has 22.
 const SSH_PORT: u16 = 2222;

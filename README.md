@@ -55,7 +55,7 @@ cargo plane setup fly
 Run it inside a project: installs flyctl if needed, logs you in, creates a
 throwaway build machine for that project that stops itself when idle, and adds
 it to the project's `.cargo/plane.toml`. `cargo plane purge fly` deletes it. See
-[`contrib/fly`](contrib/fly/README.md).
+[`crates/cargo-plane-provider-fly`](crates/cargo-plane-provider-fly/README.md).
 
 ### GitHub Codespaces
 
@@ -98,13 +98,24 @@ period (30 days by default); run setup again to get a new one.
 
 ### Provider plugins
 
-Any other provider can be a plugin: a binary named `cargo-plane-provider-<name>`
-on your PATH. A remote with `provider = "<name>"` uses it, and
-`cargo plane setup <name>` runs its setup, if it has one.
+Every provider is a plugin: a binary named `cargo-plane-provider-<name>`. A
+remote with `provider = "<name>"` uses it, and `cargo plane setup <name>` runs
+its setup, if it has one. The providers in this repo live in
+[`crates/`](crates) and build such a binary each; cargo-plane also compiles
+them in (Cargo features `ssh`, `fly` and `codespace`, on by default), so they
+work without installing anything. For a provider that isn't built in,
+cargo-plane looks on your PATH:
 
 ```sh
-cargo install --path crates/cargo-plane-provider-wol   # Wake-on-LAN, in this repo
-cargo plane setup wol
+cargo install cargo-plane-provider-<name>
+cargo plane setup <name>
+```
+
+To leave a provider out of cargo-plane and use its plugin binary instead:
+
+```sh
+cargo install cargo-plane --no-default-features --features ssh
+cargo install cargo-plane-provider-fly
 ```
 
 Plugins are written in Rust against the
@@ -142,9 +153,9 @@ on every build: the endpoint is cached) and talks to it over a Unix socket. The
 plugin keeps the terminal, so tools it runs can prompt as usual. Questions and
 status lines go through `Host`, so they look like the rest of cargo-plane.
 During setup, `Host` can also save the remote's config and run commands on it.
-The built-in providers implement the same trait; see
-[`crates/cargo-plane-provider-wol`](crates/cargo-plane-provider-wol/src/main.rs)
-for a complete plugin.
+See [`crates/cargo-plane-provider-ssh`](crates/cargo-plane-provider-ssh/src/lib.rs)
+for the smallest complete provider, and the Fly and Codespaces crates for ones
+with a setup.
 
 Plugins run with your permissions, like any program you install.
 

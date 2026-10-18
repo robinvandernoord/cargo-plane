@@ -20,6 +20,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "cargo-plane-provider",
+ "cargo-plane-provider-codespace",
+ "cargo-plane-provider-fly",
+ "cargo-plane-provider-ssh",
  "serde",
  "serde_json",
  "terminal_size",
@@ -36,13 +39,32 @@ dependencies = [
 ]
 
 [[package]]
-name = "cargo-plane-provider-wol"
+name = "cargo-plane-provider-codespace"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "cargo-plane-provider",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "cargo-plane-provider-fly"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cargo-plane-provider",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "cargo-plane-provider-ssh"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cargo-plane-provider",
+ "serde",
 ]
 
 [[package]]

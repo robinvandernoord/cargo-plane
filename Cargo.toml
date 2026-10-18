@@ -11,8 +11,19 @@ categories = ["development-tools::cargo-plugins"]
 [workspace]
 members = ["crates/*"]
 
+[features]
+default = ["ssh", "fly", "codespace"]
+# Built-in providers. Without one, cargo-plane looks for its plugin binary
+# (`cargo-plane-provider-<name>`) on PATH instead.
+ssh = ["dep:cargo-plane-provider-ssh"]
+fly = ["dep:cargo-plane-provider-fly"]
+codespace = ["dep:cargo-plane-provider-codespace"]
+
 [dependencies]
 cargo-plane-provider = { version = "0.1.0", path = "crates/cargo-plane-provider" }
+cargo-plane-provider-ssh = { version = "0.1.0", path = "crates/cargo-plane-provider-ssh", optional = true }
+cargo-plane-provider-fly = { version = "0.1.0", path = "crates/cargo-plane-provider-fly", optional = true }
+cargo-plane-provider-codespace = { version = "0.1.0", path = "crates/cargo-plane-provider-codespace", optional = true }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

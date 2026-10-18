@@ -178,15 +178,18 @@ fn setup_usage() -> String {
     let mut usage = String::from(
         "Usage: cargo plane [--remote <name>] setup <provider> [options]\n\n\
          Creates what a remote needs and adds it to the project's .cargo/plane.toml.\n\
-         `cargo plane setup <provider> --help` shows a provider's options.\n\n\
-         Built in:\n",
+         `cargo plane setup <provider> --help` shows a provider's options.\n",
     );
-    for (name, creates) in provider::builtin_setups() {
-        usage += &format!("  {name:<12} {creates}\n");
+    let builtins: Vec<_> = provider::builtin_setups().collect();
+    if !builtins.is_empty() {
+        usage += "\nBuilt in:\n";
+        for (name, creates) in builtins {
+            usage += &format!("  {name:<12} {creates}\n");
+        }
     }
     let plugins = provider::plugins();
     if plugins.is_empty() {
-        usage += "\nPlugins: none on PATH (they're named cargo-plane-provider-<name>)\n";
+        usage += "\nNo other providers on PATH (plugins are named cargo-plane-provider-<name>)\n";
     } else {
         usage += "\nPlugins on PATH:\n";
         for name in plugins {

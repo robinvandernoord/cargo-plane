@@ -11,8 +11,8 @@ use serde_json::{Value, json};
 
 use super::flyctl::{self, Flyctl, METADATA_KEY, METADATA_VALUE};
 
-const DOCKERFILE: &str = include_str!("../../../contrib/fly/Dockerfile");
-const ENTRYPOINT: &str = include_str!("../../../contrib/fly/entrypoint.sh");
+const DOCKERFILE: &str = include_str!("../image/Dockerfile");
+const ENTRYPOINT: &str = include_str!("../image/entrypoint.sh");
 const VOLUME: &str = "cargo_plane_data";
 const MACHINE_NAME: &str = "cargo-plane-builder";
 const DEFAULT_VM_SIZE: &str = "performance-4x";

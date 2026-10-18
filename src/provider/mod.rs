@@ -1,13 +1,11 @@
 //! Providers manage a remote machine's lifecycle and say how to reach it.
 //! Everything else (sync, running cargo, fetching artifacts) is shared.
 //!
-//! Built-in providers implement `cargo_plane_provider::Provider` like plugins
-//! do; a provider that isn't built in is looked up as a plugin binary.
+//! Each provider is its own crate (`crates/cargo-plane-provider-*`) that
+//! builds a plugin binary. The ones enabled as features are also compiled in;
+//! any other provider is looked up as a plugin binary on PATH.
 
-mod codespace;
-mod fly;
 mod plugin;
-mod ssh;
 
 use anyhow::{Result, bail};
 pub use cargo_plane_provider::{AnyProvider, Endpoint};
@@ -20,20 +18,23 @@ struct Builtin {
 }
 
 const BUILTINS: &[Builtin] = &[
+    #[cfg(feature = "ssh")]
     Builtin {
         name: "ssh",
         setup: None,
-        make: || Box::new(ssh::Ssh),
+        make: || Box::new(cargo_plane_provider_ssh::Ssh),
     },
+    #[cfg(feature = "fly")]
     Builtin {
         name: "fly",
         setup: Some("a Fly.io machine that stops itself when idle"),
-        make: || Box::new(fly::Fly),
+        make: || Box::new(cargo_plane_provider_fly::Fly),
     },
+    #[cfg(feature = "codespace")]
     Builtin {
         name: "codespace",
         setup: Some("a GitHub Codespace, or pick an existing one"),
-        make: || Box::new(codespace::Codespace),
+        make: || Box::new(cargo_plane_provider_codespace::Codespace),
     },
 ];
 
@@ -42,9 +43,11 @@ pub fn builtin_setups() -> impl Iterator<Item = (&'static str, &'static str)> {
     BUILTINS.iter().filter_map(|b| Some((b.name, b.setup?)))
 }
 
-/// Names of the provider plugins on PATH.
+/// Names of the provider plugins on PATH that aren't built in.
 pub fn plugins() -> Vec<String> {
-    plugin::installed()
+    let mut plugins = plugin::installed();
+    plugins.retain(|name| !BUILTINS.iter().any(|b| b.name == name));
+    plugins
 }
 
 /// The built-in provider called `name`, or else the plugin binary for it.
@@ -56,9 +59,12 @@ pub fn lookup(name: &str) -> Result<Box<dyn AnyProvider>> {
         return Ok(Box::new(plugin));
     }
     let builtins: Vec<_> = BUILTINS.iter().map(|b| b.name).collect();
+    let builtins = match builtins.as_slice() {
+        [] => "this cargo-plane has none built in".to_owned(),
+        names => format!("built in: {}", names.join(", ")),
+    };
     bail!(
-        "unknown provider `{name}`: it isn't built in ({}) and there's no `{}` on PATH",
-        builtins.join(", "),
+        "unknown provider `{name}` ({builtins}) and there's no `{}` on PATH",
         plugin::binary_name(name)
     )
 }

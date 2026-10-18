@@ -1,0 +1,15 @@
+[package]
+name = "cargo-plane-provider-fly"
+version = "0.1.0"
+edition = "2024"
+description = "cargo-plane provider: a Fly.io Machine that starts on demand and stops itself when idle"
+license = "MIT"
+readme = "README.md"
+keywords = ["cargo", "remote", "build", "plugin"]
+categories = ["development-tools::cargo-plugins"]
+
+[dependencies]
+cargo-plane-provider = { version = "0.1.0", path = "../cargo-plane-provider" }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
