@@ -2,6 +2,11 @@
 
 <!-- next-version-placeholder -->
 
+## v0.2.2 (2026-10-18)
+
+### Fix
+* **codespace:** add Rust feature to devcontainer config
+
 ## v0.2.1 (2026-10-18)
 
 ### Feature
