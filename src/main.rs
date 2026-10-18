@@ -12,11 +12,12 @@ mod util;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, ExitCode};
+use std::time::SystemTime;
 
 use anyhow::{Context, Result, bail};
 
 use crate::artifacts::Artifact;
-use crate::cargo_args::{Invocation, Selector};
+use crate::cargo_args::{Edits, Invocation, Selector};
 use crate::config::{Config, PROJECT_FILE};
 use crate::host::SetupHost;
 use crate::project::{Project, Stdout};
@@ -306,11 +307,27 @@ fn cargo(remote: &Remote, args: Vec<String>) -> Result<ExitCode> {
     ui::set_quiet(cargo_args::is_quiet(&args));
     let conn = remote.connect()?;
     let project = Project::locate(&args, &conn)?;
+    let edits = cargo_args::edits(&args);
+    let args = if edits == Edits::Sources {
+        project.check_vcs(&args)?;
+        if cargo_args::has_flag(&args, "--allow-no-vcs") {
+            args
+        } else {
+            cargo_args::insert_flag(&args, "--allow-no-vcs")
+        }
+    } else {
+        args
+    };
+    let synced_at = SystemTime::now();
     project.sync(&conn)?;
 
     match cargo_args::parse(args) {
         Invocation::Passthrough(args) => {
             let outcome = project.cargo(&conn, &args, Stdout::Passthrough)?;
+            if edits != Edits::No {
+                // Even after a failure: `cargo fix` may have fixed some files.
+                project.sync_back(&conn, synced_at)?;
+            }
             Ok(exit_code(outcome.code))
         }
         Invocation::Build(call) => {

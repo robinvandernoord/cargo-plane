@@ -175,6 +175,8 @@ Every cargo command runs remotely as-is, except:
 | `test --local-run`          | Builds tests remotely, runs them locally (e.g. hardware tests)   |
 | `fmt`                       | Runs locally: it's cheap, and remote changes would be overwritten |
 | `clippy`                    | Adds the clippy component first if the remote toolchain lacks it |
+| `fix`, `clippy --fix`       | Copies the fixed files back (needs a clean git tree, like cargo) |
+| `add`, `remove`, `update`   | Copies `Cargo.toml` and `Cargo.lock` back                         |
 | `exec <command>`            | Runs any command in the project's directory on the remote        |
 | `shell`                     | Opens an interactive shell there                                 |
 | `takeoff` / `land`          | Start / stop the remote                                          |
@@ -204,6 +206,13 @@ workspace, so diagnostics land on the right files.
   the first command each step costs about one round trip.
 - If you interrupt cargo-plane or lose the connection, the remote cargo is
   stopped too.
+
+Commands that edit files (`fix`, `clippy --fix`, `add`, `remove`, `update`,
+`generate-lockfile`) copy what they changed back. A file you edit locally while
+such a command runs is kept as is; if cargo changed it too, cargo's version is
+saved in `target/cargo-plane/conflicts/`. Before `fix` and `clippy --fix`,
+cargo-plane checks for uncommitted changes locally, as cargo would (the remote
+copy has no `.git`); `--allow-dirty` and `--allow-staged` work as usual.
 
 ## Caveats
 

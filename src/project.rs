@@ -5,6 +5,7 @@ use std::io::{self, BufRead, BufReader, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
+use std::time::SystemTime;
 
 use anyhow::{Context, Result, bail};
 
@@ -14,6 +15,13 @@ use crate::output::{replace, rewrite_stream};
 use crate::remote::{Conn, env_prelude};
 use crate::ui;
 use crate::util::{self, shell_join, shell_quote};
+
+/// What isn't synced: version control, build output, what git ignores.
+const SYNC_FILTERS: &[&str] = &[
+    "--exclude=/.git/",
+    "--exclude=/target/",
+    "--filter=:- .gitignore",
+];
 
 /// Local variables passed on to remote cargo.
 const FORWARDED_ENV: &[&str] = &[
@@ -116,14 +124,8 @@ impl Project {
         ui::status("Syncing", format!("{} to {}", self.name, conn.label()));
         let status = conn
             .rsync()
-            .args([
-                "--archive",
-                "--delete",
-                "--compress",
-                "--exclude=/.git/",
-                "--exclude=/target/",
-                "--filter=:- .gitignore",
-            ])
+            .args(["--archive", "--delete", "--compress"])
+            .args(SYNC_FILTERS)
             .arg(format!(
                 "--rsync-path=mkdir -p {} && rsync",
                 shell_quote(&self.remote_root)
@@ -244,26 +246,172 @@ impl Project {
             "Fetching",
             format!("{count} artifact{}", if count == 1 { "" } else { "s" }),
         );
+        self.pull(conn, &relative, &self.local_root)
+            .with_context(|| format!("fetching artifacts from {}", conn.label()))
+    }
 
+    /// Copy files (relative to the root) from the remote copy into `dest`.
+    fn pull(&self, conn: &Conn, relative: &BTreeSet<String>, dest: &Path) -> Result<()> {
         let mut child = conn
             .rsync()
             .args(["--archive", "--compress", "--from0", "--files-from=-"])
             .arg(conn.rsync_path(&format!("{}/", self.remote_root)))
-            .arg(format!("{}/", self.local_root_str))
+            .arg(format!("{}/", dest.display()))
             .stdin(Stdio::piped())
             .spawn()
             .context("running rsync")?;
         let mut list = Vec::new();
-        for rel in &relative {
+        for rel in relative {
             list.extend_from_slice(rel.as_bytes());
             list.push(0);
         }
         child.stdin.take().unwrap().write_all(&list)?;
         let status = child.wait()?;
         if !status.success() {
-            bail!("fetching artifacts from {} failed ({status})", conn.label());
+            bail!("rsync failed ({status})");
         }
         Ok(())
+    }
+
+    /// The local check `cargo fix` makes before editing sources (the remote
+    /// copy has no `.git`): refuse if they have uncommitted changes, unless
+    /// the user allowed that.
+    pub fn check_vcs(&self, args: &[String]) -> Result<()> {
+        if cargo_args::has_flag(args, "--allow-no-vcs")
+            || cargo_args::has_flag(args, "--allow-dirty")
+        {
+            return Ok(());
+        }
+        let sub = cargo_args::subcommand(args).unwrap_or("fix");
+        let output = Command::new("git")
+            .args(["status", "--porcelain", "--", "."])
+            .current_dir(&self.local_root)
+            .stderr(Stdio::null())
+            .output();
+        let Some(output) = output.ok().filter(|o| o.status.success()) else {
+            bail!(
+                "no git repository found for this workspace, and `cargo {sub}` can overwrite \
+                 your files; commit them to git first, or pass `--allow-no-vcs`"
+            );
+        };
+        let allow_staged = cargo_args::has_flag(args, "--allow-staged");
+        let text = String::from_utf8_lossy(&output.stdout);
+        let dirty: Vec<&str> = text
+            .lines()
+            // `XY path`: Y is the worktree; staged-only changes have a space there.
+            .filter(|line| {
+                !allow_staged || line.starts_with("??") || line.as_bytes().get(1) != Some(&b' ')
+            })
+            .map(|line| line.get(3..).unwrap_or(line))
+            .collect();
+        if !dirty.is_empty() {
+            bail!(
+                "the workspace has uncommitted changes that `cargo {sub}` could overwrite:\n  {}\n\
+                 commit or stash them first, or pass `--allow-dirty` (`--allow-staged` for \
+                 staged changes)",
+                dirty.join("\n  ")
+            );
+        }
+        Ok(())
+    }
+
+    /// Bring back files a command changed on the remote. Files changed locally
+    /// since `synced_at` are kept; if the remote changed them too, say so.
+    pub fn sync_back(&self, conn: &Conn, synced_at: SystemTime) -> Result<()> {
+        let output = conn
+            .rsync()
+            .args(["--archive", "--dry-run", "--out-format=%i %n"])
+            .args(SYNC_FILTERS)
+            .arg(conn.rsync_path(&format!("{}/", self.remote_root)))
+            .arg(format!("{}/", self.local_root_str))
+            .stdin(Stdio::null())
+            .output()
+            .context("running rsync")?;
+        if !output.status.success() {
+            bail!(
+                "checking {} for changed files failed: {}",
+                conn.label(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        // `>f` lines: regular files that would be transferred.
+        let changed = text
+            .lines()
+            .filter_map(|line| line.strip_prefix(">f")?.split_once(' ').map(|(_, n)| n));
+
+        let mut pull = BTreeSet::new();
+        let mut edited_here = Vec::new();
+        for rel in changed {
+            let modified = std::fs::metadata(self.local_root.join(rel)).and_then(|m| m.modified());
+            match modified {
+                Ok(time) if time > synced_at => edited_here.push(rel.to_owned()),
+                _ => {
+                    pull.insert(rel.to_owned());
+                }
+            }
+        }
+
+        // The next sync overwrites the remote copy, so keep cargo's version
+        // locally, where it's never synced.
+        let conflicts: BTreeSet<String> = self
+            .changed_remotely(conn, &edited_here, synced_at)?
+            .into_iter()
+            .collect();
+        if !conflicts.is_empty() {
+            let dir = self.local_root.join("target/cargo-plane/conflicts");
+            std::fs::create_dir_all(&dir)?;
+            self.pull(conn, &conflicts, &dir)
+                .with_context(|| format!("copying cargo's versions from {}", conn.label()))?;
+            for rel in &conflicts {
+                let saved = dir.join(rel);
+                let shown = saved.strip_prefix(&self.local_root).unwrap_or(&saved);
+                ui::warn(format!(
+                    "{rel} changed here while cargo ran, so it's kept as is; cargo's version \
+                     is in {}",
+                    shown.display()
+                ));
+            }
+        }
+        if pull.is_empty() {
+            return Ok(());
+        }
+        self.pull(conn, &pull, &self.local_root)
+            .with_context(|| format!("copying changed files back from {}", conn.label()))?;
+        let names: Vec<&str> = pull.iter().map(String::as_str).collect();
+        ui::status("Updated", names.join(", "));
+        Ok(())
+    }
+
+    /// Which of `files` were modified on the remote after `synced_at`. Synced
+    /// files keep their local times, so a newer one was written there.
+    fn changed_remotely(
+        &self,
+        conn: &Conn,
+        files: &[String],
+        synced_at: SystemTime,
+    ) -> Result<Vec<String>> {
+        if files.is_empty() {
+            return Ok(Vec::new());
+        }
+        let script = format!(
+            "cd {} && for f in {}; do stat -c %Y -- \"$f\" 2>/dev/null || echo 0; done",
+            shell_quote(&self.remote_root),
+            shell_join(files)
+        );
+        let output = conn.shell(&script)?.stdin(Stdio::null()).output()?;
+        let since = synced_at
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs())
+            // Allow for the clocks being a little apart.
+            .saturating_sub(2);
+        let text = String::from_utf8_lossy(&output.stdout);
+        Ok(files
+            .iter()
+            .zip(text.lines())
+            .filter(|(_, mtime)| mtime.trim().parse::<u64>().is_ok_and(|t| t >= since))
+            .map(|(file, _)| file.clone())
+            .collect())
     }
 
     /// The remote counterpart of the current directory.
