@@ -277,7 +277,7 @@ impl Project {
             }
         }
 
-        let mut script = env_prelude(&env)?;
+        let mut script = env_prelude(conn.prelude(), &env)?;
         let cwd = match self.subdir.as_str() {
             "" => self.remote_root.clone(),
             sub => format!("{}/{sub}", self.remote_root),

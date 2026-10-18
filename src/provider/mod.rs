@@ -1,6 +1,7 @@
 //! Providers manage a remote machine's lifecycle and say how to reach it.
 //! Everything else (sync, running cargo, fetching artifacts) is shared.
 
+mod codespace;
 mod fly;
 mod ssh;
 
@@ -12,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::RemoteConfig;
 
+pub use codespace::setup as setup_codespace;
 pub use fly::setup as setup_fly;
 
 /// How to reach a running remote over SSH.
@@ -31,6 +33,9 @@ pub struct Endpoint {
     /// Environment for remote cargo invocations.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    /// Shell lines run before every remote command, e.g. to find the toolchain.
+    #[serde(default)]
+    pub prelude: Option<String>,
 }
 
 pub trait Provider {
@@ -60,8 +65,9 @@ pub fn from_config(remote: &RemoteConfig) -> Result<Box<dyn Provider>> {
     Ok(match remote.provider.as_str() {
         "ssh" => Box::new(ssh::Ssh::new(remote.provider_config()?)),
         "fly" => Box::new(fly::Fly::new(remote.provider_config()?)),
+        "codespace" => Box::new(codespace::Codespace::new(remote.provider_config()?)),
         other => bail!(
-            "unknown provider `{other}` for remote `{}` (available: ssh, fly)",
+            "unknown provider `{other}` for remote `{}` (available: ssh, fly, codespace)",
             remote.name
         ),
     })

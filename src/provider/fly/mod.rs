@@ -189,6 +189,7 @@ impl Provider for Fly {
             .into_iter()
             .map(|(k, v)| (k.to_owned(), v))
             .collect(),
+            prelude: None,
         })
     }
 

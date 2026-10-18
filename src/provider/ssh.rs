@@ -30,6 +30,7 @@ impl Provider for Ssh {
             ssh_options: Vec::new(),
             remote_dir: None,
             env: Default::default(),
+            prelude: None,
         })
     }
 
