@@ -5,6 +5,7 @@
 //! SSH goes through `gh codespace ssh --stdio` as a ProxyCommand, which starts
 //! the codespace if needed, so it doesn't need a public address.
 
+mod devcontainer;
 mod gh;
 mod setup;
 

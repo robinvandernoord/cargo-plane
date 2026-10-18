@@ -19,6 +19,8 @@ Usage: cargo plane [--remote <name>] setup codespace [options]
 Interactively logs in to GitHub (with the `codespace` scope) if needed, creates
 a codespace for the current project's repository or picks an existing one, and
 adds the remote (default name: codespace) to the project's .cargo/plane.toml.
+Adds the Rust feature to the project's devcontainer.json (creating one if needed).
+Commit and push that file before creating or rebuilding a codespace to use it.
 Then checks that the codespace has rsync, a C compiler and cargo, and offers
 to install what's missing. Safe to rerun. Delete the codespace with
 `cargo plane purge codespace`.
@@ -30,10 +32,10 @@ Options:
   --machine <name>            machine type (default: a 4-CPU machine, or largest available)
   --ram <GB>                  choose the fewest CPUs with at least this much RAM (whole GB)
   --idle-timeout <minutes>    stop after 5-240 idle minutes (default: 30)
-  --devcontainer-path <path>  devcontainer.json to use (default: GitHub's default)
+  --devcontainer-path <path>  project devcontainer.json to update and use
 
---machine and --ram are mutually exclusive. Creation options only affect new
-codespaces; an existing configured codespace is reused. --yes creates a new
+--machine and --ram are mutually exclusive. Machine and idle timeout options
+only affect new codespaces; an existing configured codespace is reused. --yes creates a new
 codespace when none is configured, and requires GitHub authentication with
 codespace access to be ready beforehand. It never starts a login prompt.
 ";
@@ -126,6 +128,7 @@ pub fn setup(setup: &Setup, host: &dyn Host) -> Result<()> {
         .project_dir
         .as_ref()
         .context("run `cargo plane setup codespace` inside the project you want a codespace for")?;
+    super::devcontainer::ensure_rust(root, opts.devcontainer_path.as_deref(), host)?;
     let configured = setup
         .config
         .as_ref()
@@ -489,8 +492,8 @@ fn provision(host: &dyn Host, yes: bool) -> Result<()> {
     }
     if missing.contains(&"cargo") {
         let question = "The codespace has no Rust toolchain. Install one with rustup into \
-                        its home directory? (A rebuild of the codespace removes it; add the \
-                        `rust` dev container feature to keep it.)";
+                        its home directory for now? (To use the Rust dev container feature, \
+                        push the project's devcontainer.json and rebuild the codespace.)";
         if !yes && !host.confirm(question, true)? {
             bail!("cargo-plane needs cargo on the codespace");
         }

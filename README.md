@@ -188,22 +188,33 @@ prefers a 4-CPU machine (otherwise the largest available), and stops it after
 30 idle minutes. `--ram` takes a positive whole number of GB and selects the
 fewest CPUs with at least that much RAM, preferring less RAM when CPU counts
 match. Use either `--ram` or `--machine`. `--devcontainer-path` selects a specific
-devcontainer; unattended creation otherwise uses GitHub's default configuration
-and opts out of additional repository permissions. Creation flags only affect
-new codespaces. An existing configured codespace is reused, while an unconfigured
+devcontainer file in the local project and on GitHub; unattended creation
+otherwise uses GitHub's default configuration and opts out of additional
+repository permissions. Machine and idle timeout options only affect new
+codespaces. An existing configured codespace is reused, while an unconfigured
 remote creates a new one, matching the interactive default.
 `--codespace <name>` explicitly selects an existing codespace instead.
 
-Then it installs rsync, a C compiler and rustup on the codespace if they're
-missing, after asking. A Rust toolchain from the repository's dev container
-(the `rust` feature or the `devcontainers/rust` image) is used as is. One that
-setup installed lives in the codespace's home directory, which a rebuild of the
-codespace wipes, so add the feature to `.devcontainer/devcontainer.json` if you
-rebuild often:
+Setup adds the Rust feature to the project's `.devcontainer/devcontainer.json`
+or `.devcontainer.json`, preserving existing settings, comments and feature
+options. If neither exists, it creates `.devcontainer/devcontainer.json` using
+the universal dev container image. Use `--devcontainer-path` for an alternative
+configuration; that file must exist locally. An existing Rust feature is kept,
+including its version and options:
 
 ```json
 "features": { "ghcr.io/devcontainers/features/rust:1": {} }
 ```
+
+Commit and push the updated configuration to the repository branch used by the
+codespace before creating or rebuilding it. Creation reads files from GitHub,
+so local edits only take effect once pushed. For an existing codespace, rebuild
+it after updating its checkout to install Rust through the feature.
+
+Setup also checks the running codespace and offers to install missing rsync,
+a C compiler and Rust. Existing toolchains are used as is. The rustup fallback
+installs into the home directory to make the current container usable until
+the feature is applied; a container rebuild removes that fallback installation.
 
 SSH goes through `gh codespace ssh`, which starts a stopped codespace on demand;
 the codespace needs an SSH server, which GitHub's default image has.
