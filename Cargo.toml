@@ -1,6 +1,6 @@
 [package]
 name = "cargo-plane"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Cargo, but in the cloud(s): run cargo on a remote machine with pluggable providers (SSH, Fly.io, ...)"
 license = "MIT"

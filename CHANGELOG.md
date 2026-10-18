@@ -2,6 +2,12 @@
 
 <!-- next-version-placeholder -->
 
+## v0.1.1 (2026-10-18)
+
+### Binaries
+* add prebuilt binary installation metadata
+* build and publish platform binaries
+
 ## v0.1.0 (2026-10-18)
 
 ### Features
