@@ -1,5 +1,5 @@
 //! A Fly.io Machine with a volume for `target/` and the cargo registry.
-//! Started on demand; it stops itself when idle (see `contrib/fly`).
+//! Started on demand; it stops itself when idle (see `image/`).
 //! `cargo plane setup fly` creates everything.
 //!
 //! Unless `ssh_host` is set (e.g. via WireGuard: `<machine>.vm.<app>.internal`),
@@ -17,13 +17,10 @@ use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
+use cargo_plane_provider::{Endpoint, Host, Provider, Setup};
 use serde::Deserialize;
 
 use self::flyctl::{Flyctl, Machine};
-use super::{Endpoint, Provider};
-use crate::{ui, util};
-
-pub use setup::setup;
 
 #[derive(Deserialize)]
 pub struct Config {
@@ -42,38 +39,33 @@ fn default_user() -> String {
     "root".into()
 }
 
-/// Paths used by the image in `contrib/fly`.
+/// Paths used by the image in `image/`.
 const DATA_DIR: &str = "/data";
 /// Our sshd's port; Fly's own SSH server (for `fly ssh console`) has 22.
 const SSH_PORT: u16 = 2222;
 
-pub struct Fly(Config);
+pub struct Fly;
 
-impl Fly {
-    pub fn new(config: Config) -> Self {
-        Self(config)
-    }
-
+impl Config {
     fn flyctl(&self) -> Result<Flyctl> {
-        Flyctl::require(self.0.flyctl.as_deref())
+        Flyctl::require(self.flyctl.as_deref())
     }
 
     fn machine(&self, fly: &Flyctl) -> Result<Machine> {
-        fly.builder(&self.0.app, self.0.machine.as_deref())?
+        fly.builder(&self.app, self.machine.as_deref())?
             .with_context(|| {
                 format!(
                     "no cargo-plane machine found in Fly app `{}`; run `cargo plane setup fly`",
-                    self.0.app
+                    self.app
                 )
             })
     }
 
     /// Stable per app, so several Fly remotes don't fight over one port.
     fn proxy_addr(&self) -> SocketAddr {
-        let port = self
-            .0
-            .proxy_port
-            .unwrap_or(20000 + (util::fnv1a(self.0.app.as_bytes()) % 10000) as u16);
+        let port = self.proxy_port.unwrap_or(
+            20000 + (cargo_plane_provider::stable_hash(self.app.as_bytes()) % 10000) as u16,
+        );
         SocketAddr::from(([127, 0, 0, 1], port))
     }
 
@@ -82,21 +74,21 @@ impl Fly {
     }
 
     fn pid_file(&self) -> Result<PathBuf> {
-        Ok(util::cache_dir()?.join(format!("fly-proxy-{}.pid", self.0.app)))
+        Ok(cargo_plane_provider::cache_dir()?.join(format!("fly-proxy-{}.pid", self.app)))
     }
 
     fn ensure_proxy(&self, fly: &Flyctl, machine: &Machine) -> Result<()> {
         if self.proxy_is_up() {
             return Ok(());
         }
-        let dir = util::cache_dir()?;
+        let dir = cargo_plane_provider::cache_dir()?;
         fs::create_dir_all(&dir)?;
-        let log_path = dir.join(format!("fly-proxy-{}.log", self.0.app));
+        let log_path = dir.join(format!("fly-proxy-{}.log", self.app));
         let log = fs::File::create(&log_path)?;
         let ports = format!("{}:{SSH_PORT}", self.proxy_addr().port());
-        let target = format!("{}.vm.{}.internal", machine.id, self.0.app);
+        let target = format!("{}.vm.{}.internal", machine.id, self.app);
         let child = fly
-            .command(&["proxy", &ports, &target, "--app", &self.0.app])
+            .command(&["proxy", &ports, &target, "--app", &self.app])
             .stdin(Stdio::null())
             .stdout(log.try_clone()?)
             .stderr(log)
@@ -135,44 +127,46 @@ impl Fly {
 }
 
 impl Provider for Fly {
-    fn up(&self) -> Result<Endpoint> {
-        let fly = self.flyctl()?;
-        let mut machine = self.machine(&fly)?;
+    type Config = Config;
+
+    fn up(&self, config: &Config, host: &dyn Host) -> Result<Endpoint> {
+        let fly = config.flyctl()?;
+        let mut machine = config.machine(&fly)?;
         if machine.state != "started" {
-            ui::status(
+            host.status(
                 "Starting",
-                format!("Fly machine {} ({})", machine.id, machine.state),
+                &format!("Fly machine {} ({})", machine.id, machine.state),
             );
-            fly.output(&["machine", "start", &machine.id, "--app", &self.0.app])?;
+            fly.output(&["machine", "start", &machine.id, "--app", &config.app])?;
             let deadline = Instant::now() + Duration::from_secs(60);
             while machine.state != "started" {
                 if Instant::now() > deadline {
                     bail!("Fly machine {} did not start within 60s", machine.id);
                 }
                 sleep(Duration::from_secs(1));
-                machine = self.machine(&fly)?;
+                machine = config.machine(&fly)?;
             }
         }
 
         let mut ssh_options = Vec::new();
-        let (host, port) = match &self.0.ssh_host {
+        let (host, port) = match &config.ssh_host {
             Some(host) => (host.clone(), SSH_PORT),
             None => {
-                self.ensure_proxy(&fly, &machine)?;
+                config.ensure_proxy(&fly, &machine)?;
                 // All proxied machines share 127.0.0.1; keep their host keys apart.
                 ssh_options.extend([
                     "-o".into(),
-                    format!("HostKeyAlias=cargo-plane-fly-{}", self.0.app),
+                    format!("HostKeyAlias=cargo-plane-fly-{}", config.app),
                     "-o".into(),
                     "StrictHostKeyChecking=accept-new".into(),
                 ]);
-                ("127.0.0.1".into(), self.proxy_addr().port())
+                ("127.0.0.1".into(), config.proxy_addr().port())
             }
         };
 
         Ok(Endpoint {
             host,
-            user: Some(self.0.user.clone()),
+            user: Some(config.user.clone()),
             port: Some(port),
             ssh_options,
             remote_dir: Some(format!("{DATA_DIR}/cargo-plane")),
@@ -189,42 +183,43 @@ impl Provider for Fly {
             .into_iter()
             .map(|(k, v)| (k.to_owned(), v))
             .collect(),
+            prelude: None,
         })
     }
 
-    fn down(&self) -> Result<()> {
-        self.stop_proxy()?;
-        let fly = self.flyctl()?;
-        let machine = self.machine(&fly)?;
+    fn down(&self, config: &Config, host: &dyn Host) -> Result<()> {
+        config.stop_proxy()?;
+        let fly = config.flyctl()?;
+        let machine = config.machine(&fly)?;
         if machine.state == "started" {
-            ui::status("Stopping", format!("Fly machine {}", machine.id));
-            fly.output(&["machine", "stop", &machine.id, "--app", &self.0.app])?;
+            host.status("Stopping", &format!("Fly machine {}", machine.id));
+            fly.output(&["machine", "stop", &machine.id, "--app", &config.app])?;
         }
         Ok(())
     }
 
-    fn status(&self) -> Result<String> {
-        let proxy = match (&self.0.ssh_host, self.proxy_is_up()) {
+    fn status(&self, config: &Config, _: &dyn Host) -> Result<String> {
+        let proxy = match (&config.ssh_host, config.proxy_is_up()) {
             (Some(host), _) => format!("direct SSH to {host}"),
-            (None, true) => format!("proxy on {}", self.proxy_addr()),
+            (None, true) => format!("proxy on {}", config.proxy_addr()),
             (None, false) => "proxy not running".into(),
         };
-        let machine = self.machine(&self.flyctl()?)?;
+        let machine = config.machine(&config.flyctl()?)?;
         Ok(format!(
             "Fly machine {} in app {} ({}): {} ({proxy})",
-            machine.id, self.0.app, machine.region, machine.state
+            machine.id, config.app, machine.region, machine.state
         ))
     }
 
-    fn purge(&self) -> Result<bool> {
-        if !ui::interactive() {
+    fn purge(&self, config: &Config, host: &dyn Host) -> Result<bool> {
+        if !host.interactive() {
             bail!("`cargo plane purge` asks for confirmation; run it in a terminal");
         }
-        let fly = self.flyctl()?;
-        let app = &self.0.app;
+        let fly = config.flyctl()?;
+        let app = &config.app;
         if !fly.app_exists(app) {
-            ui::status("Gone", format!("Fly app `{app}` doesn't exist (anymore)"));
-            self.stop_proxy()?;
+            host.status("Gone", &format!("Fly app `{app}` doesn't exist (anymore)"));
+            config.stop_proxy()?;
             return Ok(true);
         }
         let machines = fly.machines(app)?;
@@ -250,17 +245,21 @@ impl Provider for Fly {
             );
         }
         eprintln!("Builds start from scratch if you set it up again.");
-        if ui::ask("Type the app name to confirm", None)? != *app {
+        if host.ask("Type the app name to confirm", None)? != *app {
             return Ok(false);
         }
 
-        self.stop_proxy()?;
-        ui::status("Destroying", format!("Fly app {app}"));
+        config.stop_proxy()?;
+        host.status("Destroying", &format!("Fly app {app}"));
         fly.interactive(&["apps", "destroy", app, "--yes"])?;
         Ok(true)
     }
 
-    fn boot_timeout(&self) -> Duration {
+    fn boot_timeout(&self, _: &Config) -> Duration {
         Duration::from_secs(60)
+    }
+
+    fn setup(&self, setup: &Setup, host: &dyn Host) -> Result<()> {
+        setup::setup(setup, host)
     }
 }

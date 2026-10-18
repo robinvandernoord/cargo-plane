@@ -23,11 +23,11 @@ RAM, volume size, idle timeout and SSH key, and then creates:
 - the app,
 - a volume `cargo_plane_data` mounted at `/data` (toolchain, cargo registry,
   synced projects and their `target/` dirs),
-- a machine `cargo-plane-builder`, built from this directory's `Dockerfile` on
+- a machine `cargo-plane-builder`, built from [`image/Dockerfile`](image/Dockerfile) on
   Fly's remote builders,
 
-and adds `[remotes.fly]` to the project's `.cargo/plane.toml` (gitignore it if
-the machine is just yours). It's safe to rerun; existing parts are reused. SSH goes through a background `flyctl proxy`,
+and adds `[remotes.fly]` to the project's `.cargo/plane.toml`. It's safe to
+rerun; existing parts are reused. SSH goes through a background `flyctl proxy`,
 so the machine doesn't need a public IP.
 
 `cargo plane takeoff` / `land` start and stop the machine; other commands

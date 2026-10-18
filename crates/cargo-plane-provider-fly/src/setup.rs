@@ -1,23 +1,18 @@
 //! `cargo plane setup fly`: install flyctl, log in, create the app, volume and
-//! builder machine, and add the remote to the global config.
+//! builder machine, and add the remote to the project's config.
 
 use std::fs;
-use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 
 use anyhow::{Context, Result, bail};
-use serde_json::Value;
+use cargo_plane_provider::{Host, Setup};
+use serde_json::{Value, json};
 
 use super::flyctl::{self, Flyctl, METADATA_KEY, METADATA_VALUE};
-use crate::config::{Config, PROJECT_FILE};
-use crate::project::workspace_root;
-use crate::remote::Remote;
-use crate::{ui, util};
 
-const DOCKERFILE: &str = include_str!("../../../contrib/fly/Dockerfile");
-const ENTRYPOINT: &str = include_str!("../../../contrib/fly/entrypoint.sh");
+const DOCKERFILE: &str = include_str!("../image/Dockerfile");
+const ENTRYPOINT: &str = include_str!("../image/entrypoint.sh");
 const VOLUME: &str = "cargo_plane_data";
 const MACHINE_NAME: &str = "cargo-plane-builder";
 const DEFAULT_VM_SIZE: &str = "performance-4x";
@@ -42,40 +37,45 @@ struct Options {
     eject: Option<PathBuf>,
 }
 
-pub fn setup(remote_name: Option<&str>, args: &[String]) -> Result<()> {
-    let Some(opts) = parse_args(args)? else {
+pub fn setup(setup: &Setup, host: &dyn Host) -> Result<()> {
+    let Some(opts) = parse_args(&setup.args)? else {
         print!("{USAGE}");
         return Ok(());
     };
     if let Some(dir) = &opts.eject {
         write_build_files(dir)?;
-        ui::status(
+        host.status(
             "Wrote",
-            format!("Dockerfile and entrypoint.sh to {}", dir.display()),
+            &format!("Dockerfile and entrypoint.sh to {}", dir.display()),
         );
         return Ok(());
     }
-    if !ui::interactive() {
+    if !host.interactive() {
         bail!("`cargo plane setup fly` asks questions; run it in a terminal");
     }
-    let remote_name = remote_name.unwrap_or("fly");
+    let remote_name = &setup.remote;
 
-    let fly = ensure_flyctl()?;
-    ensure_login(&fly)?;
+    let fly = ensure_flyctl(host)?;
+    ensure_login(&fly, host)?;
 
     // One throwaway machine per project, configured in that project.
-    let root = workspace_root(None)
+    let root = setup
+        .project_dir
+        .as_ref()
         .context("run `cargo plane setup fly` inside the project you want a build machine for")?;
-    let config_path = root.join(PROJECT_FILE);
-    let configured_app = configured_app(&config_path, remote_name)?;
+    let configured_app = setup
+        .config
+        .as_ref()
+        .and_then(|c| c.get("app"))
+        .and_then(Value::as_str);
     let project = root
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("project");
     let default_app = configured_app
-        .clone()
+        .map(str::to_owned)
         .unwrap_or_else(|| default_app_name(project, &std::env::var("USER").unwrap_or_default()));
-    let app = ui::ask("App name (globally unique on Fly.io)", Some(&default_app))?;
+    let app = host.ask("App name (globally unique on Fly.io)", Some(&default_app))?;
 
     let app_exists = fly.app_exists(&app);
     let builder = if app_exists {
@@ -86,36 +86,25 @@ pub fn setup(remote_name: Option<&str>, args: &[String]) -> Result<()> {
 
     match &builder {
         Some(machine) if !opts.rebuild => {
-            ui::status(
+            host.status(
                 "Found",
-                format!(
+                &format!(
                     "builder machine {} in {app}; use --rebuild to recreate it",
                     machine.id
                 ),
             );
-            write_config(
-                &config_path,
-                remote_name,
-                &app,
-                configured_app.as_deref(),
-                None,
-            )?;
+            save_config(host, remote_name, &app, configured_app, None)?;
         }
         _ => {
-            let plan = ask_plan(&fly, &app, app_exists)?;
-            if !ui::confirm("Create these resources?", false)? {
+            let plan = ask_plan(&fly, host, &app, app_exists)?;
+            if !host.confirm("Create these resources?", false)? {
                 bail!("aborted");
             }
             // Before creating anything, so `purge` can clean up a failed setup.
-            write_config(
-                &config_path,
-                remote_name,
-                &app,
-                configured_app.as_deref(),
-                Some(&plan.ssh_key),
-            )?;
+            save_config(host, remote_name, &app, configured_app, Some(&plan.ssh_key))?;
             create(
                 &fly,
+                host,
                 &app,
                 &plan,
                 builder.as_ref().map(|m| m.id.as_str()),
@@ -129,8 +118,7 @@ pub fn setup(remote_name: Option<&str>, args: &[String]) -> Result<()> {
             })?;
         }
     }
-
-    smoke_test(remote_name)
+    Ok(())
 }
 
 fn parse_args(args: &[String]) -> Result<Option<Options>> {
@@ -156,9 +144,9 @@ fn parse_args(args: &[String]) -> Result<Option<Options>> {
     Ok(Some(opts))
 }
 
-fn ensure_flyctl() -> Result<Flyctl> {
+fn ensure_flyctl(host: &dyn Host) -> Result<Flyctl> {
     if let Some(fly) = Flyctl::locate(None) {
-        ui::status("Found", format!("flyctl at {}", fly.path().display()));
+        host.status("Found", &format!("flyctl at {}", fly.path().display()));
         return Ok(fly);
     }
     eprintln!("cargo-plane manages Fly.io machines through flyctl, which isn't installed.");
@@ -166,15 +154,15 @@ fn ensure_flyctl() -> Result<Flyctl> {
         "Download the latest flyctl from GitHub into {}?",
         flyctl::install_dir()?.display()
     );
-    if !ui::confirm(&question, true)? {
+    if !host.confirm(&question, true)? {
         bail!(
             "flyctl is required; install it yourself (https://fly.io/docs/flyctl/install/) and rerun"
         );
     }
-    flyctl::install()
+    flyctl::install(host)
 }
 
-fn ensure_login(fly: &Flyctl) -> Result<()> {
+fn ensure_login(fly: &Flyctl, host: &dyn Host) -> Result<()> {
     if !fly.logged_in() {
         eprintln!(
             "\nYou're not logged in to Fly.io. flyctl will now open a browser to log in\n\
@@ -186,7 +174,7 @@ fn ensure_login(fly: &Flyctl) -> Result<()> {
         }
     }
     let who = fly.output(&["auth", "whoami"])?;
-    ui::status("Logged in", format!("as {}", who.trim()));
+    host.status("Logged in", &format!("as {}", who.trim()));
     Ok(())
 }
 
@@ -203,11 +191,11 @@ struct Plan {
     volume_exists: bool,
 }
 
-fn ask_plan(fly: &Flyctl, app: &str, app_exists: bool) -> Result<Plan> {
+fn ask_plan(fly: &Flyctl, host: &dyn Host, app: &str, app_exists: bool) -> Result<Plan> {
     let org = if app_exists {
         None
     } else {
-        Some(ask_org(fly)?)
+        Some(ask_org(fly, host)?)
     };
 
     let existing_volume = if app_exists {
@@ -217,10 +205,10 @@ fn ask_plan(fly: &Flyctl, app: &str, app_exists: bool) -> Result<Plan> {
     };
     let region = match &existing_volume {
         Some(region) => {
-            ui::status("Found", format!("volume {VOLUME} in {region}"));
+            host.status("Found", &format!("volume {VOLUME} in {region}"));
             region.clone()
         }
-        None => ask_region(fly)?,
+        None => ask_region(fly, host)?,
     };
 
     let sizes = vm_sizes(fly);
@@ -238,7 +226,7 @@ fn ask_plan(fly: &Flyctl, app: &str, app_exists: bool) -> Result<Plan> {
         }
     }
     let vm_size = loop {
-        let name = ui::ask(
+        let name = host.ask(
             "Machine size (more CPUs build faster, cost more per second)",
             Some(DEFAULT_VM_SIZE),
         )?;
@@ -248,10 +236,10 @@ fn ask_plan(fly: &Flyctl, app: &str, app_exists: bool) -> Result<Plan> {
         if let Some(size) = sizes.iter().find(|s| s.name == name) {
             break Some(size);
         }
-        ui::warn(format!("unknown size `{name}`"));
+        host.warn(&format!("unknown size `{name}`"));
     };
     let (vm_size, memory_mb) = match vm_size {
-        Some(size) => (size.name.clone(), ask_memory(size)?),
+        Some(size) => (size.name.clone(), ask_memory(host, size)?),
         None => (DEFAULT_VM_SIZE.to_owned(), None),
     };
     let memory_note = memory_mb.map_or(String::new(), |mb| format!(" with {} RAM", format_mb(mb)));
@@ -260,12 +248,13 @@ fn ask_plan(fly: &Flyctl, app: &str, app_exists: bool) -> Result<Plan> {
         0
     } else {
         ask_number(
+            host,
             "Volume size in GB (toolchain, registry cache, target dirs)",
             20,
         )?
     };
-    let idle_minutes = ask_number("Stop the machine after how many idle minutes", 15)?;
-    let ssh_key = ask_ssh_key()?;
+    let idle_minutes = ask_number(host, "Stop the machine after how many idle minutes", 15)?;
+    let ssh_key = ask_ssh_key(host)?;
 
     eprintln!();
     eprintln!(
@@ -307,7 +296,7 @@ fn ask_plan(fly: &Flyctl, app: &str, app_exists: bool) -> Result<Plan> {
     })
 }
 
-fn ask_org(fly: &Flyctl) -> Result<String> {
+fn ask_org(fly: &Flyctl, host: &dyn Host) -> Result<String> {
     // `orgs list --json` is a map of slug to name (or a list of objects).
     let orgs: Vec<String> = match fly.json::<Value, _>(&["orgs", "list", "--json"]) {
         Ok(Value::Object(map)) => map.keys().cloned().collect(),
@@ -323,12 +312,12 @@ fn ask_org(fly: &Flyctl) -> Result<String> {
             if !orgs.is_empty() {
                 eprintln!("Organizations: {}", orgs.join(", "));
             }
-            ui::ask("Organization for the new app", Some("personal"))
+            host.ask("Organization for the new app", Some("personal"))
         }
     }
 }
 
-fn ask_region(fly: &Flyctl) -> Result<String> {
+fn ask_region(fly: &Flyctl, host: &dyn Host) -> Result<String> {
     let regions = fly
         .json::<Value, _>(&["platform", "regions", "--json"])
         .ok()
@@ -349,19 +338,19 @@ fn ask_region(fly: &Flyctl) -> Result<String> {
         }
     }
     loop {
-        let region = ui::ask("Region (pick one close to you)", None)?;
+        let region = host.ask("Region (pick one close to you)", None)?;
         if regions.is_empty() || regions.iter().any(|(code, _)| *code == region) {
             return Ok(region);
         }
-        ui::warn(format!("unknown region `{region}`"));
+        host.warn(&format!("unknown region `{region}`"));
     }
 }
 
-fn ask_number(question: &str, default: u32) -> Result<u32> {
+fn ask_number(host: &dyn Host, question: &str, default: u32) -> Result<u32> {
     loop {
-        match ui::ask(question, Some(&default.to_string()))?.parse() {
+        match host.ask(question, Some(&default.to_string()))?.parse() {
             Ok(n) if n > 0 => return Ok(n),
-            _ => ui::warn("enter a positive number"),
+            _ => host.warn("enter a positive number"),
         }
     }
 }
@@ -375,8 +364,8 @@ const DEFAULT_KEYS: &[&str] = &[
     "id_ecdsa_sk",
 ];
 
-fn ask_ssh_key() -> Result<PathBuf> {
-    let ssh_dir = util::home_dir()?.join(".ssh");
+fn ask_ssh_key(host: &dyn Host) -> Result<PathBuf> {
+    let ssh_dir = cargo_plane_provider::home_dir()?.join(".ssh");
     let mut keys: Vec<PathBuf> = fs::read_dir(&ssh_dir)
         .map(|entries| {
             entries
@@ -413,30 +402,31 @@ fn ask_ssh_key() -> Result<PathBuf> {
         eprintln!("  {}) {}", i + 1, key.display());
     }
     loop {
-        let answer = ui::ask("SSH key to log in with", Some("1"))?;
+        let answer = host.ask("SSH key to log in with", Some("1"))?;
         match answer.parse::<usize>() {
             Ok(n) if (1..=keys.len()).contains(&n) => return Ok(keys.swap_remove(n - 1)),
-            _ => ui::warn(format!("pick a number from 1 to {}", keys.len())),
+            _ => host.warn(&format!("pick a number from 1 to {}", keys.len())),
         }
     }
 }
 
 fn create(
     fly: &Flyctl,
+    host: &dyn Host,
     app: &str,
     plan: &Plan,
     old_machine: Option<&str>,
     opts: &Options,
 ) -> Result<()> {
     if let Some(org) = &plan.org {
-        ui::status("Creating", format!("app {app}"));
+        host.status("Creating", &format!("app {app}"));
         fly.interactive(&["apps", "create", app, "--org", org])?;
     }
 
     if !plan.volume_exists {
-        ui::status(
+        host.status(
             "Creating",
-            format!("volume {VOLUME} ({} GB)", plan.volume_gb),
+            &format!("volume {VOLUME} ({} GB)", plan.volume_gb),
         );
         fly.interactive(&[
             "volumes",
@@ -455,9 +445,9 @@ fn create(
     }
 
     if let Some(id) = old_machine {
-        ui::status(
+        host.status(
             "Destroying",
-            format!("old builder machine {id} (the volume is kept)"),
+            &format!("old builder machine {id} (the volume is kept)"),
         );
         fly.interactive(&["machine", "destroy", id, "--app", app, "--force"])?;
     }
@@ -471,13 +461,13 @@ fn create(
             (path.parent().unwrap().to_path_buf(), path)
         }
         None => {
-            let dir = util::cache_dir()?.join("fly-build");
+            let dir = cargo_plane_provider::cache_dir()?.join("fly-build");
             write_build_files(&dir)?;
             (dir.clone(), dir.join("Dockerfile"))
         }
     };
 
-    ui::status(
+    host.status(
         "Building",
         "builder image on Fly.io's remote builder (takes a few minutes)",
     );
@@ -544,91 +534,29 @@ fn write_build_files(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Add `[remotes.<name>]` to the global config, never overwriting.
-fn write_config(
-    path: &Path,
+/// Point the remote at `app`, and at the SSH key if ssh wouldn't find it.
+fn save_config(
+    host: &dyn Host,
     name: &str,
     app: &str,
     configured_app: Option<&str>,
     ssh_key: Option<&Path>,
 ) -> Result<()> {
-    let mut snippet = format!("\n[remotes.{name}]\nprovider = \"fly\"\napp = \"{app}\"\n");
+    let mut config = json!({ "app": app });
     if let Some(key) = ssh_key {
         let private = key.with_extension("");
         let stem = private.file_name().and_then(|s| s.to_str()).unwrap_or("");
         if !DEFAULT_KEYS.contains(&stem) {
-            snippet += &format!("ssh_options = [\"-i\", \"{}\"]\n", private.display());
+            config["ssh_options"] = json!(["-i", private.display().to_string()]);
         }
     }
-
-    match configured_app {
-        Some(existing) if existing == app => {
-            ui::status("Configured", format!("remote `{name}` already uses {app}"));
-        }
-        Some(existing) => {
-            ui::warn(format!(
-                "remote `{name}` is configured for app `{existing}`; not touching it. \
-                 To use the new app, put this in {}:\n{snippet}",
-                path.display()
-            ));
-        }
-        None => {
-            fs::create_dir_all(path.parent().unwrap())?;
-            let mut file = fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)?;
-            file.write_all(snippet.as_bytes())?;
-            ui::status(
-                "Configured",
-                format!(
-                    "remote `{name}` in {} (gitignore it if the machine is just yours)",
-                    path.display()
-                ),
-            );
-        }
+    if let Some(old) = configured_app.filter(|old| *old != app) {
+        host.warn(&format!(
+            "remote `{name}` used app `{old}` and now uses `{app}`; `{old}` still exists \
+             (delete it with `flyctl apps destroy {old}`)"
+        ));
     }
-    Ok(())
-}
-
-fn smoke_test(name: &str) -> Result<()> {
-    let config = Config::load(&std::env::current_dir()?)?;
-    let remote = Remote::new(config.select(Some(name))?)?;
-    let conn = remote.takeoff()?;
-    let output = conn
-        .shell("cargo --version")?
-        .stdin(Stdio::null())
-        .output()?;
-    if !output.status.success() {
-        bail!(
-            "connected, but `cargo --version` failed on the machine ({}): {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    ui::status(
-        "Ready",
-        format!(
-            "{} on remote `{name}`; try `cargo plane --remote {name} check`",
-            String::from_utf8_lossy(&output.stdout).trim()
-        ),
-    );
-    Ok(())
-}
-
-/// The app this project's config already uses for `name`, if any.
-fn configured_app(path: &Path, name: &str) -> Result<Option<String>> {
-    let Ok(text) = fs::read_to_string(path) else {
-        return Ok(None);
-    };
-    let table: toml::Table =
-        toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
-    Ok(table
-        .get("remotes")
-        .and_then(|r| r.get(name))
-        .and_then(|r| r.get("app"))
-        .and_then(toml::Value::as_str)
-        .map(str::to_owned))
+    host.save_config(&config)
 }
 
 /// `cargo-plane-<project>-<user>`: recognizable in the Fly dashboard and
@@ -704,7 +632,7 @@ fn vm_sizes(fly: &Flyctl) -> Vec<VmSize> {
 }
 
 /// Ask for RAM within the size's limits; `None` keeps the preset.
-fn ask_memory(size: &VmSize) -> Result<Option<u64>> {
+fn ask_memory(host: &dyn Host, size: &VmSize) -> Result<Option<u64>> {
     let (min, max) = size.memory_range();
     let question = format!(
         "RAM for {} ({} to {}; Rust builds like lots of it)",
@@ -713,16 +641,16 @@ fn ask_memory(size: &VmSize) -> Result<Option<u64>> {
         format_mb(max)
     );
     loop {
-        let answer = ui::ask(&question, Some(&format_mb(size.memory_mb)))?;
+        let answer = host.ask(&question, Some(&format_mb(size.memory_mb)))?;
         match parse_memory(&answer) {
             Some(mb) if mb == size.memory_mb => return Ok(None),
             Some(mb) if (min..=max).contains(&mb) && mb % 256 == 0 => return Ok(Some(mb)),
-            Some(_) => ui::warn(format!(
+            Some(_) => host.warn(&format!(
                 "pick a multiple of 256 MB from {} to {}",
                 format_mb(min),
                 format_mb(max)
             )),
-            None => ui::warn("enter a size like 16, 16G or 512M"),
+            None => host.warn("enter a size like 16, 16G or 512M"),
         }
     }
 }
