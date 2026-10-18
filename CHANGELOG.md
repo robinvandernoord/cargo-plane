@@ -4,8 +4,6 @@
 
 ## v0.1.2 (2026-10-18)
 
-
-
 ### Versioning
 * make subcrates follow main version
 
