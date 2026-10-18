@@ -1,6 +1,6 @@
 [package]
 name = "cargo-plane-provider-fly"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
 description = "cargo-plane provider: a Fly.io Machine that starts on demand and stops itself when idle"
 license = "MIT"

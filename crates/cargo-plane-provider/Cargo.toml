@@ -1,6 +1,6 @@
 [package]
 name = "cargo-plane-provider"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
 description = "Write provider plugins for cargo-plane: start and stop a build machine, say how to reach it"
 license = "MIT"

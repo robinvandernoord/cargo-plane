@@ -1,6 +1,6 @@
 [package]
 name = "cargo-plane-provider-ssh"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
 description = "cargo-plane provider: an always-on machine reachable over SSH"
 license = "MIT"

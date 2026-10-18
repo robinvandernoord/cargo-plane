@@ -31,7 +31,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-plane-provider"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "serde",
@@ -40,7 +40,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-plane-provider-codespace"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "cargo-plane-provider",
@@ -50,7 +50,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-plane-provider-fly"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "cargo-plane-provider",
@@ -60,7 +60,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-plane-provider-ssh"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "cargo-plane-provider",

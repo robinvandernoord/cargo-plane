@@ -1,6 +1,6 @@
 [package]
 name = "cargo-plane-provider-codespace"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
 description = "cargo-plane provider: a GitHub Codespace, reached through the GitHub CLI"
 license = "MIT"
