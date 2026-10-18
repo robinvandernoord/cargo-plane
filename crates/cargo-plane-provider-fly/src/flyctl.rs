@@ -36,6 +36,14 @@ struct MachineConfig {
 }
 
 impl Machine {
+    pub fn docker(&self) -> bool {
+        self.config
+            .metadata
+            .get("plane-build-environment")
+            .map(String::as_str)
+            == Some("docker")
+    }
+
     pub fn is_builder(&self) -> bool {
         self.config.metadata.get(METADATA_KEY).map(String::as_str) == Some(METADATA_VALUE)
     }

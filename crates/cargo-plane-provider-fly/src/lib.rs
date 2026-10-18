@@ -33,6 +33,8 @@ pub struct Config {
     user: String,
     /// Path to flyctl; found automatically when unset.
     flyctl: Option<String>,
+    /// Set by frontends that provision a Docker host rather than a Rust host.
+    build_environment: Option<String>,
 }
 
 fn default_user() -> String {
@@ -132,6 +134,11 @@ impl Provider for Fly {
     fn up(&self, config: &Config, host: &dyn Host) -> Result<Endpoint> {
         let fly = config.flyctl()?;
         let mut machine = config.machine(&fly)?;
+        if config.build_environment.as_deref() == Some("docker") && !machine.docker() {
+            bail!(
+                "this Fly machine was provisioned for Cargo; run Docker setup with a separate app, or explicitly rebuild its image"
+            );
+        }
         if machine.state != "started" {
             host.status(
                 "Starting",

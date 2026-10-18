@@ -1,0 +1,20 @@
+[package]
+name = "docker-plane"
+version = "0.1.0"
+edition = "2024"
+description = "Docker builds on remote machines with Fly.io, Codespaces and SSH providers"
+license = "MIT"
+readme = "README.md"
+keywords = ["docker", "buildkit", "remote", "build", "cloud"]
+categories = ["development-tools"]
+
+[dependencies]
+anyhow = "1"
+cargo-plane-provider = { version = "0.1.0", path = "../cargo-plane-provider" }
+cargo-plane-provider-ssh = { version = "0.1.0", path = "../cargo-plane-provider-ssh" }
+cargo-plane-provider-fly = { version = "0.1.0", path = "../cargo-plane-provider-fly" }
+cargo-plane-provider-codespace = { version = "0.1.0", path = "../cargo-plane-provider-codespace" }
+serde_json = "1"
+toml = { version = "0.9", features = ["preserve_order"] }
+toml_edit = "0.23"
+tempfile = "3"

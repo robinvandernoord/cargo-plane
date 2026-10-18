@@ -35,23 +35,26 @@ struct Options {
     rebuild: bool,
     dockerfile: Option<PathBuf>,
     eject: Option<PathBuf>,
+    docker: bool,
 }
 
 pub fn setup(setup: &Setup, host: &dyn Host) -> Result<()> {
-    let Some(opts) = parse_args(&setup.args)? else {
+    let Some(mut opts) = parse_args(&setup.args)? else {
         print!("{USAGE}");
         return Ok(());
     };
+    opts.docker = setup.docker();
+    let command = setup.command();
     if let Some(dir) = &opts.eject {
-        write_build_files(dir)?;
+        write_environment_files(dir, opts.docker)?;
         host.status(
             "Wrote",
-            &format!("Dockerfile and entrypoint.sh to {}", dir.display()),
+            &format!("Dockerfile and entrypoint script to {}", dir.display()),
         );
         return Ok(());
     }
     if !host.interactive() {
-        bail!("`cargo plane setup fly` asks questions; run it in a terminal");
+        bail!("`{command} setup fly` asks questions; run it in a terminal");
     }
     let remote_name = &setup.remote;
 
@@ -59,10 +62,9 @@ pub fn setup(setup: &Setup, host: &dyn Host) -> Result<()> {
     ensure_login(&fly, host)?;
 
     // One throwaway machine per project, configured in that project.
-    let root = setup
-        .project_dir
-        .as_ref()
-        .context("run `cargo plane setup fly` inside the project you want a build machine for")?;
+    let root = setup.project_dir.as_ref().with_context(|| {
+        format!("run `{command} setup fly` inside the project you want a build machine for")
+    })?;
     let configured_app = setup
         .config
         .as_ref()
@@ -72,9 +74,19 @@ pub fn setup(setup: &Setup, host: &dyn Host) -> Result<()> {
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("project");
-    let default_app = configured_app
-        .map(str::to_owned)
-        .unwrap_or_else(|| default_app_name(project, &std::env::var("USER").unwrap_or_default()));
+    let default_app = configured_app.map(str::to_owned).unwrap_or_else(|| {
+        let name = default_app_name(project, &std::env::var("USER").unwrap_or_default());
+        if opts.docker {
+            name.replacen("cargo-plane-", "docker-plane-", 1)
+                .chars()
+                .take(63)
+                .collect::<String>()
+                .trim_end_matches('-')
+                .to_owned()
+        } else {
+            name
+        }
+    });
     let app = host.ask("App name (globally unique on Fly.io)", Some(&default_app))?;
 
     let app_exists = fly.app_exists(&app);
@@ -83,6 +95,15 @@ pub fn setup(setup: &Setup, host: &dyn Host) -> Result<()> {
     } else {
         None
     };
+    if builder
+        .as_ref()
+        .is_some_and(|machine| machine.docker() != opts.docker)
+        && !opts.rebuild
+    {
+        bail!(
+            "the existing Fly builder uses a different build environment; choose another app, or pass --rebuild to replace its image"
+        );
+    }
 
     match &builder {
         Some(machine) if !opts.rebuild => {
@@ -113,7 +134,7 @@ pub fn setup(setup: &Setup, host: &dyn Host) -> Result<()> {
             .map_err(|err| {
                 err.context(format!(
                     "setup failed partway; rerun it to continue, or remove what was \
-                     created with `cargo plane --remote {remote_name} purge`"
+                     created with `{command} --remote {remote_name} purge`"
                 ))
             })?;
         }
@@ -126,6 +147,7 @@ fn parse_args(args: &[String]) -> Result<Option<Options>> {
         rebuild: false,
         dockerfile: None,
         eject: None,
+        docker: false,
     };
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
@@ -149,7 +171,7 @@ fn ensure_flyctl(host: &dyn Host) -> Result<Flyctl> {
         host.status("Found", &format!("flyctl at {}", fly.path().display()));
         return Ok(fly);
     }
-    eprintln!("cargo-plane manages Fly.io machines through flyctl, which isn't installed.");
+    eprintln!("The Fly provider needs flyctl, which isn't installed.");
     let question = format!(
         "Download the latest flyctl from GitHub into {}?",
         flyctl::install_dir()?.display()
@@ -282,7 +304,7 @@ fn ask_plan(fly: &Flyctl, host: &dyn Host, app: &str, app_exists: bool) -> Resul
     eprintln!(
         "  - the volume, per GB per month, until it's deleted; the machine stopping doesn't delete it"
     );
-    eprintln!("Delete everything later with `cargo plane purge`.");
+    eprintln!("Delete everything later with the frontend's `purge` command.");
 
     Ok(Plan {
         org,
@@ -461,8 +483,12 @@ fn create(
             (path.parent().unwrap().to_path_buf(), path)
         }
         None => {
-            let dir = cargo_plane_provider::cache_dir()?.join("fly-build");
-            write_build_files(&dir)?;
+            let dir = cargo_plane_provider::cache_dir()?.join(if opts.docker {
+                "fly-build-docker"
+            } else {
+                "fly-build"
+            });
+            write_environment_files(&dir, opts.docker)?;
             (dir.clone(), dir.join("Dockerfile"))
         }
     };
@@ -501,6 +527,9 @@ fn create(
     ]
     .map(String::from)
     .to_vec();
+    if opts.docker {
+        args.extend(["--metadata".into(), "plane-build-environment=docker".into()]);
+    }
     if let Some(memory_mb) = plan.memory_mb {
         args.extend(["--vm-memory".into(), memory_mb.to_string()]);
     }
@@ -525,11 +554,23 @@ fn find_volume(fly: &Flyctl, app: &str) -> Result<Option<String>> {
     }))
 }
 
-fn write_build_files(dir: &Path) -> Result<()> {
+fn write_environment_files(dir: &Path, docker: bool) -> Result<()> {
     fs::create_dir_all(dir)?;
-    fs::write(dir.join("Dockerfile"), DOCKERFILE)?;
-    let entrypoint = dir.join("entrypoint.sh");
-    fs::write(&entrypoint, ENTRYPOINT)?;
+    let (dockerfile, script) = if docker {
+        (
+            include_str!("../image/Dockerfile.docker"),
+            include_str!("../image/entrypoint-docker.sh"),
+        )
+    } else {
+        (DOCKERFILE, ENTRYPOINT)
+    };
+    fs::write(dir.join("Dockerfile"), dockerfile)?;
+    let entrypoint = dir.join(if docker {
+        "entrypoint-docker.sh"
+    } else {
+        "entrypoint.sh"
+    });
+    fs::write(&entrypoint, script)?;
     fs::set_permissions(&entrypoint, fs::Permissions::from_mode(0o755))?;
     Ok(())
 }

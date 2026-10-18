@@ -8,6 +8,11 @@ compiling. Providers handle the remote's lifecycle: a plain SSH host, a
 Fly.io Machine that starts on demand and stops itself when idle, or a GitHub
 Codespace.
 
+For Docker image builds, this workspace also includes
+[`docker-plane`](crates/docker-plane/README.md): `docker plane build` and
+`docker plane bake`, using the same providers with a Docker build environment
+and independent `.docker/plane.toml` configuration.
+
 ```sh
 cargo plane check
 cargo plane clippy -- -D warnings
