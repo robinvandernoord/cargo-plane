@@ -101,11 +101,23 @@ fn run() -> Result<ExitCode> {
     }
 
     if args[0] == "setup" {
-        let Some(provider) = args.get(1) else {
-            bail!("usage: cargo plane setup <provider> (built in: fly, codespace)");
+        return match args.get(1).map(String::as_str) {
+            None => {
+                print!("{}", setup_usage());
+                Ok(ExitCode::FAILURE)
+            }
+            Some("-h" | "--help" | "help") => {
+                print!("{}", setup_usage());
+                Ok(ExitCode::SUCCESS)
+            }
+            Some(flag) if flag.starts_with('-') => {
+                bail!("unknown option `{flag}` for `setup`\n\n{}", setup_usage())
+            }
+            Some(provider) => {
+                setup(provider, remote_name.as_deref(), &args[2..])?;
+                Ok(ExitCode::SUCCESS)
+            }
         };
-        setup(provider, remote_name.as_deref(), &args[2..])?;
-        return Ok(ExitCode::SUCCESS);
     }
 
     // Lifecycle commands take the remote as an optional argument too:
@@ -160,6 +172,28 @@ fn run() -> Result<ExitCode> {
         }
         _ => cargo(&remote, args),
     }
+}
+
+fn setup_usage() -> String {
+    let mut usage = String::from(
+        "Usage: cargo plane [--remote <name>] setup <provider> [options]\n\n\
+         Creates what a remote needs and adds it to the project's .cargo/plane.toml.\n\
+         `cargo plane setup <provider> --help` shows a provider's options.\n\n\
+         Built in:\n",
+    );
+    for (name, creates) in provider::builtin_setups() {
+        usage += &format!("  {name:<12} {creates}\n");
+    }
+    let plugins = provider::plugins();
+    if plugins.is_empty() {
+        usage += "\nPlugins: none on PATH (they're named cargo-plane-provider-<name>)\n";
+    } else {
+        usage += "\nPlugins on PATH:\n";
+        for name in plugins {
+            usage += &format!("  {name}\n");
+        }
+    }
+    usage
 }
 
 /// `cargo plane setup <provider>`: the provider creates what it needs and

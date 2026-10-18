@@ -14,23 +14,38 @@ pub use cargo_plane_provider::{AnyProvider, Endpoint};
 
 struct Builtin {
     name: &'static str,
+    /// What `setup` creates; `None` if it has no setup.
+    setup: Option<&'static str>,
     make: fn() -> Box<dyn AnyProvider>,
 }
 
 const BUILTINS: &[Builtin] = &[
     Builtin {
         name: "ssh",
+        setup: None,
         make: || Box::new(ssh::Ssh),
     },
     Builtin {
         name: "fly",
+        setup: Some("a Fly.io machine that stops itself when idle"),
         make: || Box::new(fly::Fly),
     },
     Builtin {
         name: "codespace",
+        setup: Some("a GitHub Codespace, or pick an existing one"),
         make: || Box::new(codespace::Codespace),
     },
 ];
+
+/// Built-in providers with a setup, and what it creates.
+pub fn builtin_setups() -> impl Iterator<Item = (&'static str, &'static str)> {
+    BUILTINS.iter().filter_map(|b| Some((b.name, b.setup?)))
+}
+
+/// Names of the provider plugins on PATH.
+pub fn plugins() -> Vec<String> {
+    plugin::installed()
+}
 
 /// The built-in provider called `name`, or else the plugin binary for it.
 pub fn lookup(name: &str) -> Result<Box<dyn AnyProvider>> {

@@ -4,7 +4,7 @@
 use std::cell::{RefCell, RefMut};
 use std::fs;
 use std::io::{BufReader, ErrorKind};
-use std::os::unix::fs::DirBuilderExt;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::process::{Child, Command};
@@ -17,8 +17,31 @@ use cargo_plane_provider::{AnyProvider, Host, Setup, Started};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
+const PREFIX: &str = "cargo-plane-provider-";
+
 pub fn binary_name(provider: &str) -> String {
-    format!("cargo-plane-provider-{provider}")
+    format!("{PREFIX}{provider}")
+}
+
+/// Provider names of the plugin binaries on PATH, sorted.
+pub fn installed() -> Vec<String> {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let mut names: Vec<String> = std::env::split_paths(&path)
+        .filter_map(|dir| fs::read_dir(dir).ok())
+        .flatten()
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let name = entry.file_name().into_string().ok()?;
+            let provider = name.strip_prefix(PREFIX)?;
+            let executable = entry
+                .metadata()
+                .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0);
+            (executable && !provider.is_empty()).then(|| provider.to_owned())
+        })
+        .collect();
+    names.sort();
+    names.dedup();
+    names
 }
 
 /// A plugin binary, started on first use and kept running until dropped.

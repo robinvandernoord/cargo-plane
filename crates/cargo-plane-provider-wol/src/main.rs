@@ -20,6 +20,14 @@ use cargo_plane_provider::{Endpoint, Host, Provider, Setup, run};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+const SETUP_USAGE: &str = "\
+Usage: cargo plane [--remote <name>] setup wol
+
+Asks for the machine's SSH host and MAC address and adds the remote (default
+name: wol) to the project's .cargo/plane.toml. Optional settings (broadcast,
+sleep_command, boot_timeout) can be added there by hand.
+";
+
 #[derive(Deserialize)]
 struct Config {
     host: String,
@@ -146,6 +154,14 @@ impl Provider for WakeOnLan {
     }
 
     fn setup(&self, setup: &Setup, host: &dyn Host) -> Result<()> {
+        match setup.args.as_slice() {
+            [] => {}
+            [help] if help == "-h" || help == "--help" => {
+                print!("{SETUP_USAGE}");
+                return Ok(());
+            }
+            [other, ..] => bail!("unknown option `{other}` for `setup wol`\n\n{SETUP_USAGE}"),
+        }
         if !host.interactive() {
             bail!("`cargo plane setup wol` asks questions; run it in a terminal");
         }
