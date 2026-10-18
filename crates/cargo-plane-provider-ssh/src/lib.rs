@@ -34,6 +34,7 @@ impl Provider for Ssh {
     type Config = Config;
 
     fn setup(&self, setup: &Setup, host: &dyn Host) -> Result<()> {
+        let command = setup.command();
         if setup.args.iter().any(|arg| arg == "-h" || arg == "--help") {
             print!("{SETUP_USAGE}");
             return Ok(());
@@ -78,9 +79,11 @@ impl Provider for Ssh {
                 host.ask("SSH hostname or alias", existing)?
             } else {
                 existing
-                    .context(
-                        "provide a host with `cargo plane setup ssh <host>`, or run in a terminal",
-                    )?
+                    .with_context(|| {
+                        format!(
+                            "provide a host with `{command} setup ssh <host>`, or run in a terminal"
+                        )
+                    })?
                     .to_owned()
             };
             update["host"] = json!(name);
@@ -90,7 +93,11 @@ impl Provider for Ssh {
             bail!("provide a nonempty SSH hostname or alias");
         }
         host.save_config(&update)?;
-        setup::provision(host, yes)
+        if setup.docker() {
+            cargo_plane_provider::require_docker(host)
+        } else {
+            setup::provision(host, yes)
+        }
     }
 
     fn up(&self, config: &Config, _: &dyn Host) -> Result<Endpoint> {

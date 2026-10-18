@@ -28,6 +28,7 @@ to install what's missing. Safe to rerun. Delete the codespace with
 const DEFAULT_IDLE_MINUTES: u32 = 30;
 
 pub fn setup(setup: &Setup, host: &dyn Host) -> Result<()> {
+    let command = setup.command();
     match setup.args.as_slice() {
         [] => {}
         [help] if help == "-h" || help == "--help" => {
@@ -37,21 +38,20 @@ pub fn setup(setup: &Setup, host: &dyn Host) -> Result<()> {
         [other, ..] => bail!("unknown option `{other}` for `setup codespace`\n\n{USAGE}"),
     }
     if !host.interactive() {
-        bail!("`cargo plane setup codespace` asks questions; run it in a terminal");
+        bail!("`{command} setup codespace` asks questions; run it in a terminal");
     }
     let remote = &setup.remote;
 
     let gh = Gh::locate(None).context(
-        "cargo-plane manages codespaces through the GitHub CLI; install `gh` \
+        "the Codespaces provider needs the GitHub CLI; install `gh` \
          (https://cli.github.com) and rerun",
     )?;
     host.status("Found", &format!("gh at {}", gh.path().display()));
     ensure_login(&gh)?;
 
-    let root = setup
-        .project_dir
-        .as_ref()
-        .context("run `cargo plane setup codespace` inside the project you want a codespace for")?;
+    let root = setup.project_dir.as_ref().with_context(|| {
+        format!("run `{command} setup codespace` inside the project you want a codespace for")
+    })?;
     let configured = setup
         .config
         .as_ref()
@@ -73,12 +73,16 @@ pub fn setup(setup: &Setup, host: &dyn Host) -> Result<()> {
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("project");
-            pick_or_create(&gh, host, root, project)?
+            pick_or_create(&gh, host, root, project, setup.docker())?
         }
     };
     host.save_config(&json!({ "codespace": name }))?;
 
-    provision(host)
+    if setup.docker() {
+        cargo_plane_provider::require_docker(host)
+    } else {
+        provision(host)
+    }
 }
 
 fn ensure_login(gh: &Gh) -> Result<()> {
@@ -116,7 +120,13 @@ fn ensure_login(gh: &Gh) -> Result<()> {
 }
 
 /// The name of an existing codespace the user picks, or of a new one.
-fn pick_or_create(gh: &Gh, host: &dyn Host, root: &Path, project: &str) -> Result<String> {
+fn pick_or_create(
+    gh: &Gh,
+    host: &dyn Host,
+    root: &Path,
+    project: &str,
+    docker: bool,
+) -> Result<String> {
     let default_repo = gh
         .command(&[
             "repo",
@@ -161,7 +171,7 @@ fn pick_or_create(gh: &Gh, host: &dyn Host, root: &Path, project: &str) -> Resul
             match answer.parse::<usize>() {
                 Ok(n) if (1..=existing.len()).contains(&n) => {
                     host.warn(
-                        "`cargo plane purge` deletes the whole codespace, including your \
+                        "Purging deletes the whole codespace, including your \
                          work in it; only use it on one you can throw away",
                     );
                     return Ok(existing[n - 1].name.clone());
@@ -171,7 +181,7 @@ fn pick_or_create(gh: &Gh, host: &dyn Host, root: &Path, project: &str) -> Resul
         }
     }
 
-    create(gh, host, &repo, project)
+    create(gh, host, &repo, project, docker)
 }
 
 #[derive(Deserialize)]
@@ -190,7 +200,7 @@ struct Machine {
     storage_in_bytes: u64,
 }
 
-fn create(gh: &Gh, host: &dyn Host, repo: &str, project: &str) -> Result<String> {
+fn create(gh: &Gh, host: &dyn Host, repo: &str, project: &str, docker: bool) -> Result<String> {
     let mut machines = gh
         .json::<Machines, _>(&["api", &format!("repos/{repo}/codespaces/machines")])
         .map(|m| m.machines)
@@ -236,7 +246,12 @@ fn create(gh: &Gh, host: &dyn Host, repo: &str, project: &str) -> Result<String>
             _ => host.warn("enter a number from 5 to 240"),
         }
     };
-    let display_name: String = format!("cargo-plane {project}").chars().take(48).collect();
+    let tool = if docker {
+        "docker-plane"
+    } else {
+        "cargo-plane"
+    };
+    let display_name: String = format!("{tool} {project}").chars().take(48).collect();
 
     eprintln!();
     eprintln!("  Repository:  {repo} (default branch)");
@@ -250,7 +265,7 @@ fn create(gh: &Gh, host: &dyn Host, repo: &str, project: &str) -> Result<String>
     eprintln!("  - storage, per GB-month until the codespace is deleted");
     eprintln!("  Personal accounts get a monthly allowance of both for free. GitHub deletes");
     eprintln!("  stopped codespaces after their retention period (30 days by default).");
-    eprintln!("Delete it earlier with `cargo plane purge`.");
+    eprintln!("Delete it earlier with the frontend's `purge` command.");
     if !host.confirm("Create this codespace?", false)? {
         bail!("aborted");
     }
@@ -284,7 +299,7 @@ fn create(gh: &Gh, host: &dyn Host, repo: &str, project: &str) -> Result<String>
     match new.as_slice() {
         [name] => Ok(name.clone()),
         _ => bail!(
-            "can't tell which codespace was just created; add it to .cargo/plane.toml yourself \
+            "can't tell which codespace was just created; add it to the frontend's configuration yourself \
              (`provider = \"codespace\"`, `codespace = \"<name from gh codespace list>\"`)"
         ),
     }

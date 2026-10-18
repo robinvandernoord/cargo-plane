@@ -3,6 +3,12 @@
 //! SSH; cargo-plane does everything else (syncing, running cargo, fetching
 //! artifacts).
 //!
+//! docker-plane also uses these providers for lifecycle and SSH connectivity,
+//! then delegates image builds to Buildx. Its setup configuration includes
+//! `build_environment = "docker"`; providers can inspect [`Setup::docker`] to
+//! choose the appropriate host image or tool checks. Existing Cargo callers
+//! and external-provider protocol messages remain compatible.
+//!
 //! A plugin is a binary named `cargo-plane-provider-<name>` on PATH. Remotes
 //! with `provider = "<name>"` use it:
 //!
@@ -140,12 +146,49 @@ pub trait Provider {
 pub struct Setup {
     /// Name of the remote being set up (`--remote`, default: the provider's name).
     pub remote: String,
-    /// The Cargo workspace setup was run in, if any.
+    /// The frontend's project directory, if any.
     pub project_dir: Option<PathBuf>,
     /// The remote's current table in the project's config, if it exists.
     pub config: Option<Value>,
     /// Arguments after `setup <provider>`.
     pub args: Vec<String>,
+}
+
+impl Setup {
+    /// Command used in setup instructions for the selected build environment.
+    pub fn command(&self) -> &'static str {
+        if self.docker() {
+            "docker plane"
+        } else {
+            "cargo plane"
+        }
+    }
+
+    /// Frontends can request Docker provisioning through the setup configuration.
+    /// Missing settings retain the original Cargo environment and wire protocol.
+    pub fn docker(&self) -> bool {
+        self.config
+            .as_ref()
+            .and_then(|config| config.get("build_environment"))
+            .and_then(Value::as_str)
+            == Some("docker")
+    }
+}
+
+/// Verify Docker access as the SSH user, without changing an existing daemon.
+/// Docker frontends use Buildx to provision the BuildKit container afterwards.
+pub fn require_docker(host: &dyn Host) -> Result<()> {
+    let output = host.run_remote("docker info >/dev/null", true)?;
+    if !output.success {
+        bail!(
+            "Docker is unavailable to the remote SSH user: {}\n\
+             Install and start Docker, and give that user access to its socket. \
+             For Codespaces, add the docker-in-docker devcontainer feature and rebuild; \
+             then rerun setup. No Rust toolchain is needed.",
+            output.stderr.trim()
+        );
+    }
+    Ok(())
 }
 
 /// cargo-plane's side: the terminal, and during setup the config and the
@@ -165,7 +208,7 @@ pub trait Host {
     fn confirm(&self, question: &str, default: bool) -> Result<bool>;
 
     /// Setup only: merge `config` (a JSON object) into the remote's table in
-    /// the project's `.cargo/plane.toml`, creating it if needed.
+    /// the frontend's project configuration, creating it if needed.
     fn save_config(&self, config: &Value) -> Result<()>;
 
     /// Setup only, after [`Host::save_config`]: run a POSIX shell command on

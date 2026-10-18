@@ -1,0 +1,11 @@
+# Docker build host. Docker's data directory lives on the persistent volume.
+FROM debian:trixie-slim
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends docker.io docker-cli openssh-server iproute2 ca-certificates \
+ && rm -rf /var/lib/apt/lists/* \
+ && mkdir -p /run/sshd \
+ && printf 'Port 2222\nPasswordAuthentication no\n' > /etc/ssh/sshd_config.d/plane.conf
+
+COPY --chmod=755 entrypoint-docker.sh /usr/local/bin/docker-plane-entrypoint
+ENTRYPOINT ["/usr/local/bin/docker-plane-entrypoint"]
