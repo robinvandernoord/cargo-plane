@@ -82,6 +82,9 @@ impl Remote {
         if common.remote_dir.is_some() {
             endpoint.remote_dir = common.remote_dir.clone();
         }
+        if common.remote_path.is_some() {
+            endpoint.remote_path = common.remote_path.clone();
+        }
         endpoint.env.extend(common.env.clone());
         endpoint
             .ssh_options
@@ -205,11 +208,20 @@ impl Conn {
 
     /// Absolute remote base dir for synced projects.
     pub fn base_dir(&self) -> String {
-        let dir = self
-            .endpoint
-            .remote_dir
-            .as_deref()
-            .unwrap_or(DEFAULT_REMOTE_DIR);
+        self.absolute(
+            self.endpoint
+                .remote_dir
+                .as_deref()
+                .unwrap_or(DEFAULT_REMOTE_DIR),
+        )
+    }
+
+    /// Absolute remote project dir, if configured with `remote_path`.
+    pub fn project_path(&self) -> Option<String> {
+        self.endpoint.remote_path.as_deref().map(|p| self.absolute(p))
+    }
+
+    fn absolute(&self, dir: &str) -> String {
         if dir.starts_with('/') {
             dir.trim_end_matches('/').to_owned()
         } else {

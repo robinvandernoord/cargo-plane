@@ -109,7 +109,9 @@ impl Project {
             .collect();
         // The hash keeps same-named projects from different paths apart.
         let hash = util::fnv1a(local_root_str.as_bytes()) as u32;
-        let remote_root = format!("{}/{name}-{hash:08x}", conn.base_dir());
+        let remote_root = conn
+            .project_path()
+            .unwrap_or_else(|| format!("{}/{name}-{hash:08x}", conn.base_dir()));
 
         Ok(Self {
             local_root,

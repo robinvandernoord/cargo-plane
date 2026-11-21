@@ -8,6 +8,7 @@
 //! provider = "ssh"        # defaults to the remote's name
 //! host = "my-box"
 //! remote_dir = "builds"   # relative to the remote $HOME, or absolute
+//! remote_path = "src/foo" # exact project dir instead of `<remote_dir>/<name>-<hash>`
 //! env = { RUST_LOG = "info" }
 //! ssh_options = ["-o", "Compression=yes"]
 //! ```
@@ -34,6 +35,7 @@ pub struct Config {
 #[derive(Debug, Default, Deserialize)]
 pub struct Common {
     pub remote_dir: Option<String>,
+    pub remote_path: Option<String>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
     #[serde(default)]

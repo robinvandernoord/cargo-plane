@@ -77,6 +77,10 @@ pub struct Endpoint {
     /// Base directory for synced projects: absolute, or relative to the remote `$HOME`.
     #[serde(default)]
     pub remote_dir: Option<String>,
+    /// Exact remote directory for this project, overriding `remote_dir`:
+    /// absolute, or relative to the remote `$HOME`.
+    #[serde(default)]
+    pub remote_path: Option<String>,
     /// Environment for remote cargo invocations.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
@@ -98,7 +102,7 @@ impl Endpoint {
 /// A kind of remote machine: how to start, stop and describe one.
 pub trait Provider {
     /// The remote's table from cargo-plane's config. It also holds the keys
-    /// every remote has (`provider`, `env`, `ssh_options`, `remote_dir`), so
+    /// every remote has (`provider`, `env`, `ssh_options`, `remote_dir`, `remote_path`), so
     /// don't deny unknown fields.
     type Config: DeserializeOwned;
 

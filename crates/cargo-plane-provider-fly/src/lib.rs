@@ -170,6 +170,7 @@ impl Provider for Fly {
             port: Some(port),
             ssh_options,
             remote_dir: Some(format!("{DATA_DIR}/cargo-plane")),
+            remote_path: None,
             // sshd doesn't pass the image's ENV on, so set the toolchain up here.
             env: [
                 ("CARGO_HOME", format!("{DATA_DIR}/cargo")),
