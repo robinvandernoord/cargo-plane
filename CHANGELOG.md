@@ -2,6 +2,11 @@
 
 <!-- next-version-placeholder -->
 
+## v0.3.0 (2026-11-21)
+
+### Feature
+* **remote:** support exact remote project paths
+
 ## v0.2.2 (2026-10-18)
 
 ### Fix
