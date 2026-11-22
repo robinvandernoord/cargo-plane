@@ -36,6 +36,12 @@ const BUILTINS: &[Builtin] = &[
         setup: Some("a GitHub Codespace, or pick an existing one"),
         make: || Box::new(cargo_plane_provider_codespace::Codespace),
     },
+    #[cfg(feature = "container")]
+    Builtin {
+        name: "container",
+        setup: Some("a Docker or Podman build container on an SSH host"),
+        make: || Box::new(cargo_plane_provider_container::Container),
+    },
 ];
 
 /// Built-in providers with a setup, and what it creates.

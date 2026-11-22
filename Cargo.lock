@@ -21,6 +21,7 @@ dependencies = [
  "anyhow",
  "cargo-plane-provider",
  "cargo-plane-provider-codespace",
+ "cargo-plane-provider-container",
  "cargo-plane-provider-fly",
  "cargo-plane-provider-ssh",
  "serde",
@@ -45,6 +46,16 @@ dependencies = [
  "anyhow",
  "cargo-plane-provider",
  "jsonc-parser",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "cargo-plane-provider-container"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "cargo-plane-provider",
  "serde",
  "serde_json",
 ]

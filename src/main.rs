@@ -47,6 +47,7 @@ Setup:
   setup ssh         configure an existing SSH host
   setup fly         install flyctl, log in and create a Fly.io build machine
   setup codespace   create a GitHub Codespace (or pick one) to build on
+  setup container   build a Docker/Podman build container on an SSH host
   setup <name>      set up a remote with the `cargo-plane-provider-<name>` plugin
 
 Lifecycle:

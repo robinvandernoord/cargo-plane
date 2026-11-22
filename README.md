@@ -5,8 +5,8 @@ Cargo, but in the cloud(s). ✈️
 `cargo plane <command>` syncs your workspace to a remote machine, runs cargo
 there and streams the output back, so a weak laptop doesn't have to do the
 compiling. Providers handle the remote's lifecycle: a plain SSH host, a
-Fly.io Machine that starts on demand and stops itself when idle, or a GitHub
-Codespace.
+Docker or Podman container on an SSH host, a Fly.io Machine that starts on
+demand and stops itself when idle, or a GitHub Codespace.
 
 ```sh
 cargo plane check
@@ -25,7 +25,7 @@ download a prebuilt binary:
 cargo binstall cargo-plane
 ```
 
-Release binaries include the SSH, Fly.io and Codespaces providers and are built
+Release binaries include the SSH, container, Fly.io and Codespaces providers and are built
 for Linux and macOS on x86_64 and ARM64. Linux binaries require glibc 2.35 or
 newer (for example, Ubuntu 22.04). macOS binaries require macOS 15 or newer.
 
@@ -73,6 +73,7 @@ cargo plane setup ssh            # asks for an existing SSH hostname or alias
 cargo plane setup ssh my-box --user robin --port 2222
 cargo plane setup fly            # create a Fly.io machine
 cargo plane setup codespace      # create or pick a GitHub Codespace
+cargo plane setup container      # a Docker/Podman build container on an SSH host
 ```
 
 Use `cargo plane --remote <name> setup <provider>` to name the configuration.
@@ -136,6 +137,27 @@ reports local execution, and `purge` reports that there is nothing to delete.
 Local setup only writes configuration and needs no SSH connection.
 To switch between configured local and remote
 providers, use `--remote <name>` or `CARGO_PLANE_REMOTE` as usual.
+
+### Containers on an SSH host
+
+```sh
+cargo plane setup container my-box
+```
+
+Builds run in a Docker or Podman container on `my-box`: its CPU, but the
+image's userland. Binaries link against the image's glibc instead of the
+host's, so a host on a newer distribution can build binaries for an older
+laptop. Use this instead of plain `ssh` when the two machines run different
+distributions. Pick a base image (`--image`, default `ubuntu:24.04`) no newer
+than the oldest system the binaries have to run on.
+
+Setup builds the image on the host and creates one container per project,
+with volumes for synced projects, `target/` and the cargo cache. The container
+runs no SSH server and publishes no ports: each connection goes through the
+host's SSH and runs a one-shot `sshd -i` in the container. Commands start it
+when it's stopped; `status` doesn't. It never stops itself unless you pass
+`--idle-timeout <min>`.
+See [`crates/cargo-plane-provider-container`](crates/cargo-plane-provider-container/README.md).
 
 ### Fly.io
 
@@ -232,7 +254,7 @@ Remote providers are plugins: binaries named `cargo-plane-provider-<name>`. A
 remote with `provider = "<name>"` uses it, and `cargo plane setup <name>` runs
 its setup, if it has one. The providers in this repo live in
 [`crates/`](crates) and build such a binary each; cargo-plane also compiles
-them in (Cargo features `ssh`, `fly` and `codespace`, on by default), so they
+them in (Cargo features `ssh`, `container`, `fly` and `codespace`, on by default), so they
 work without installing anything. For a provider that isn't built in,
 cargo-plane looks on your PATH:
 
@@ -305,6 +327,7 @@ Every cargo command runs remotely as-is, except:
 | `exec <command>`            | Runs any command in the project's directory on the remote        |
 | `shell`                     | Opens an interactive shell there                                 |
 | `takeoff` / `land`          | Start / stop the remote                                          |
+| `setup container`           | Build a Docker/Podman build container on an SSH host             |
 | `setup fly`                 | Create a Fly.io build machine and configure it as a remote       |
 | `setup codespace`           | Create or pick a GitHub Codespace and configure it as a remote   |
 | `setup <plugin>`            | Run a provider plugin's setup                                    |

@@ -1,0 +1,15 @@
+[package]
+name = "cargo-plane-provider-container"
+version.workspace = true
+edition = "2024"
+description = "cargo-plane provider: a Docker or Podman container on an SSH host, with its own userland"
+license = "MIT"
+readme = "README.md"
+keywords = ["cargo", "remote", "build", "plugin", "docker"]
+categories = ["development-tools::cargo-plugins"]
+
+[dependencies]
+cargo-plane-provider = { version = "0.3.0", path = "../cargo-plane-provider" }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

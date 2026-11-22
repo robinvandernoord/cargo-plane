@@ -74,7 +74,8 @@ impl Config {
                  cargo plane setup local       # build on this machine\n  \
                  cargo plane setup ssh         # use an existing SSH host\n  \
                  cargo plane setup fly         # create a Fly.io machine\n  \
-                 cargo plane setup codespace   # create or pick a GitHub Codespace\n\n\
+                 cargo plane setup codespace   # create or pick a GitHub Codespace\n  \
+                 cargo plane setup container   # a build container on an SSH host\n\n\
                  Or add one to `{PROJECT_FILE}` or `~/.config/cargo-plane/config.toml`:\n\n  \
                  [remotes.dev]\n  provider = \"ssh\"\n  host = \"my-build-box\"\n"
             ),
@@ -93,7 +94,7 @@ impl Config {
             bail!(
                 "remote `{name}` is not configured ({known}); add it to `{PROJECT_FILE}` or \
                  ~/.config/cargo-plane/config.toml, or run `cargo plane setup <provider>` \
-                 (local, ssh, fly or codespace); use `--remote {name}` before `setup` to name it"
+                 (local, ssh, fly, codespace or container); use `--remote {name}` before `setup` to name it"
             );
         };
         let provider = match table.get("provider") {

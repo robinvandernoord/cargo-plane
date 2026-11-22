@@ -218,7 +218,10 @@ impl Conn {
 
     /// Absolute remote project dir, if configured with `remote_path`.
     pub fn project_path(&self) -> Option<String> {
-        self.endpoint.remote_path.as_deref().map(|p| self.absolute(p))
+        self.endpoint
+            .remote_path
+            .as_deref()
+            .map(|p| self.absolute(p))
     }
 
     fn absolute(&self, dir: &str) -> String {
