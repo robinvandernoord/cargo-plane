@@ -2,6 +2,11 @@
 
 <!-- next-version-placeholder -->
 
+## v0.4.0 (2026-11-22)
+
+### Feature
+* **container:** add SSH-hosted build container provider
+
 ## v0.3.0 (2026-11-21)
 
 ### Feature
