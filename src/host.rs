@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail};
 use cargo_plane_provider::{Host, RemoteOutput};
 use serde_json::Value;
 
-use crate::config::{self, Config, PROJECT_FILE};
+use crate::config::{self, Config, PROJECT_FILE, RemoteConfig};
 use crate::remote::{Conn, Remote};
 use crate::ui;
 
@@ -39,6 +39,31 @@ fn ignore_in_git(path: &Path) -> Result<()> {
             gitignore.display()
         ),
     );
+    Ok(())
+}
+
+/// Installs fast mode's linker where it's missing and prints where it is.
+fn find_wild() -> String {
+    crate::fast::script(None, false) + "printf '%s\\n' \"$plane_wild\"\n"
+}
+
+/// Run [`find_wild`] and say what fast mode will use.
+fn report_fast(mut command: std::process::Command) -> Result<()> {
+    let output = command
+        .stdin(Stdio::null())
+        .stderr(Stdio::inherit())
+        .output()
+        .context("checking fast mode's linker")?;
+    let dir = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if output.status.success() && !dir.is_empty() {
+        ui::status("Fast", format!("mode on: wild linker in {dir}"));
+    } else {
+        ui::warn(
+            "fast mode is on, but the wild linker isn't available there (it needs Linux on \
+             x86-64, AArch64 or RISC-V, curl or wget, and sha256sum); builds use the default \
+             linker, with lighter debug info",
+        );
+    }
     Ok(())
 }
 
@@ -95,17 +120,25 @@ impl SetupHost {
         }
     }
 
+    fn config(&self) -> Result<RemoteConfig> {
+        let dir = match &self.project_dir {
+            Some(dir) => dir.clone(),
+            None => std::env::current_dir()?,
+        };
+        Config::load(&dir)?.select(Some(&self.remote))
+    }
+
     fn connect(&self) -> Result<RefMut<'_, Conn>> {
         let mut conn = self.conn.borrow_mut();
         if conn.is_none() {
-            let dir = match &self.project_dir {
-                Some(dir) => dir.clone(),
-                None => std::env::current_dir()?,
-            };
-            let remote = Remote::new(Config::load(&dir)?.select(Some(&self.remote))?)?;
-            *conn = Some(remote.takeoff()?);
+            *conn = Some(Remote::new(self.config()?)?.takeoff()?);
         }
         Ok(RefMut::map(conn, |c| c.as_mut().unwrap()))
+    }
+
+    /// Whether the provider saved the remote's config.
+    pub fn saved(&self) -> bool {
+        self.saved.get()
     }
 
     /// If the provider saved a config, check that cargo runs on the remote.
@@ -115,11 +148,19 @@ impl SetupHost {
         }
         let name = &self.remote;
         if self.provider == "local" {
+            if self.config()?.common.fast {
+                let mut sh = std::process::Command::new("sh");
+                sh.arg("-c").arg(find_wild());
+                report_fast(sh)?;
+            }
             ui::status(
                 "Ready",
                 format!("local execution; try `cargo plane --remote {name} check`"),
             );
             return Ok(());
+        }
+        if self.connect()?.fast {
+            report_fast(self.connect()?.shell(&find_wild())?)?;
         }
         let output = self
             .connect()?

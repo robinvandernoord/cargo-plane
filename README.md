@@ -103,6 +103,7 @@ host = "my-build-box"       # hostname or ~/.ssh/config alias
 # remote_dir = "builds"     # relative to remote $HOME; default .cache/cargo-plane
 # env = { RUSTFLAGS = "-C target-cpu=x86-64-v2" }
 # ssh_options = ["-o", "Compression=yes"]
+# fast = true               # quicker rebuilds; see "Fast mode" below
 ```
 
 Pick another remote per invocation with `cargo plane --remote <name> ...` or
@@ -112,6 +113,43 @@ Pick another remote per invocation with `cargo plane --remote <name> ...` or
 When `cargo plane setup` creates that file, it also adds it to
 `.cargo/.gitignore`, since the machines it describes are yours. Remove that line
 to share a remote with your team. `.cargo/config.toml` isn't touched.
+
+### Fast mode
+
+```sh
+cargo plane setup <provider> --fast   # any provider, or add `fast = true` yourself
+```
+
+Fast mode makes rebuilds after a small edit quicker, with tools that are stable
+today and without changing your project or its toolchain:
+
+- **The [wild](https://github.com/davidlattimore/wild) linker** on Linux
+  (x86-64, AArch64 and RISC-V hosts). After a small edit, linking is most of
+  the rebuild. A pinned, checksummed static build is downloaded to
+  `$CARGO_HOME/cargo-plane/` the first time it's needed (setup does this
+  right away). If that fails, for example without network access, builds
+  use the default linker, and the download is retried after a day.
+- **Line tables only for dev debug info**, unless the project sets
+  `profile.dev.debug` itself. Backtraces keep files and lines, and the
+  target directory shrinks by about a third, but debuggers can't show
+  variables. To keep full debug info, set `debug = true` under
+  `[profile.dev]`.
+
+Both are passed to cargo as `--config` arguments, which merge with the
+project's own `.cargo/config.toml`. A `RUSTFLAGS` environment variable
+replaces all config rustflags, so it turns off the linker part. Turning fast
+mode on or off changes the rustflags, so the next build is a full one.
+
+Measured on [nushell](https://github.com/nushell/nushell) through a
+container remote on a 32-core host:
+
+| Rebuild after editing | Default | `fast = true` |
+| --------------------- | ------- | ------------- |
+| the binary crate      | 2.7s    | 1.35s         |
+| a library it uses     | 8.35s   | 6.85s         |
+
+Cranelift and the parallel front end were measured too. They need nightly
+and gained little on top of this, so fast mode doesn't use them.
 
 ### Local execution
 

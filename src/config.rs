@@ -11,6 +11,7 @@
 //! remote_path = "src/foo" # exact project dir instead of `<remote_dir>/<name>-<hash>`
 //! env = { RUST_LOG = "info" }
 //! ssh_options = ["-o", "Compression=yes"]
+//! fast = true             # faster dev builds: see `crate::fast`
 //! ```
 
 use std::collections::BTreeMap;
@@ -40,6 +41,9 @@ pub struct Common {
     pub env: BTreeMap<String, String>,
     #[serde(default)]
     pub ssh_options: Vec<String>,
+    /// Faster builds with tools the remote has: see `crate::fast`.
+    #[serde(default)]
+    pub fast: bool,
 }
 
 pub struct RemoteConfig {

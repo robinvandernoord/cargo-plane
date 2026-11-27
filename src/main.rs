@@ -1,6 +1,7 @@
 mod artifacts;
 mod cargo_args;
 mod config;
+mod fast;
 mod host;
 mod local;
 mod output;
@@ -23,6 +24,7 @@ use crate::config::{Config, PROJECT_FILE};
 use crate::host::SetupHost;
 use crate::project::{Project, Stdout};
 use crate::remote::{Conn, Remote};
+use cargo_plane_provider::Host as _;
 
 const LIFECYCLE: &[&str] = &["takeoff", "land", "status", "purge"];
 
@@ -49,6 +51,9 @@ Setup:
   setup codespace   create a GitHub Codespace (or pick one) to build on
   setup container   build a Docker/Podman build container on an SSH host
   setup <name>      set up a remote with the `cargo-plane-provider-<name>` plugin
+
+Fast mode (`setup <provider> --fast`, or `fast = true` on a remote): the wild
+linker and lighter dev debug info, for quicker rebuilds.
 
 Lifecycle:
   takeoff   start the remote and connect
@@ -195,9 +200,11 @@ fn run() -> Result<ExitCode> {
 
 fn setup_usage() -> String {
     let mut usage = String::from(
-        "Usage: cargo plane [--remote <name>] setup <provider> [options]\n\n\
+        "Usage: cargo plane [--remote <name>] setup <provider> [--fast] [options]\n\n\
          Configures a provider in the project's .cargo/plane.toml.\n\
-         `cargo plane setup <provider> --help` shows a provider's options.\n",
+         `cargo plane setup <provider> --help` shows a provider's options.\n\
+         --fast (any provider) turns on fast mode: the wild linker and lighter\n\
+         dev debug info, for quicker rebuilds (`fast = true` in the config).\n",
     );
     let builtins: Vec<_> = provider::builtin_setups().collect();
     if !builtins.is_empty() {
@@ -239,17 +246,22 @@ fn setup(provider_name: &str, remote_name: Option<&str>, args: &[String]) -> Res
             );
         }
     }
+    // `--fast` is cargo-plane's, for every provider: theirs never see it.
+    let fast = args.iter().any(|a| a == "--fast");
     let setup = cargo_plane_provider::Setup {
         remote: remote.into(),
         project_dir: project_dir.clone(),
         config: existing.map(serde_json::to_value).transpose()?,
-        args: args.to_vec(),
+        args: args.iter().filter(|a| *a != "--fast").cloned().collect(),
     };
     let host = SetupHost::new(remote, provider_name, project_dir);
     if provider_name == "local" {
         local::setup(&setup, &host)?;
     } else {
         provider::lookup(provider_name)?.setup(&setup, &host)?;
+    }
+    if fast && host.saved() {
+        host.save_config(&serde_json::json!({ "fast": true }))?;
     }
     host.finish()
 }

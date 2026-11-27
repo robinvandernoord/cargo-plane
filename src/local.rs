@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 use cargo_plane_provider::{Host, Setup};
 
 use crate::config::RemoteConfig;
-use crate::{cargo_args, ui};
+use crate::{cargo_args, fast, project, ui};
 
 pub fn setup(setup: &Setup, host: &dyn Host) -> Result<()> {
     const USAGE: &str = "Usage: cargo plane [--remote <name>] setup local [-y|--yes]\n\n\
@@ -76,13 +76,34 @@ pub fn run(config: &RemoteConfig, mut args: Vec<String>) -> Result<ExitCode> {
                 }
             }
             let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-            let mut command = Command::new(cargo);
-            command.args(args);
-            command
+            if config.common.fast {
+                fast_cargo(config, &cargo, &args)?
+            } else {
+                let mut command = Command::new(cargo);
+                command.args(args);
+                command
+            }
         }
     };
     command.envs(&config.common.env);
     // Replace Plane so terminal access, signals and exit status belong directly
     // to the local command, just as when invoked without Plane.
     Err(command.exec()).context("running local command")
+}
+
+/// Cargo through `sh`, which adds fast mode's `--config` arguments.
+fn fast_cargo(config: &RemoteConfig, cargo: &std::ffi::OsStr, args: &[String]) -> Result<Command> {
+    let cargo = cargo.to_str().context("$CARGO is not valid UTF-8")?;
+    let debug = !config.common.env.contains_key("CARGO_PROFILE_DEV_DEBUG")
+        && std::env::var_os("CARGO_PROFILE_DEV_DEBUG").is_none()
+        && project::workspace_root(cargo_args::flag_value(args, "--manifest-path"))
+            .is_ok_and(|root| !fast::project_sets_debug(&root));
+    let script = format!(
+        "{}exec {}\n",
+        fast::script(cargo_args::toolchain(args), debug),
+        fast::command(cargo, args)
+    );
+    let mut command = Command::new("sh");
+    command.arg("-c").arg(script);
+    Ok(command)
 }

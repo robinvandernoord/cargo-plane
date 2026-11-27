@@ -39,6 +39,8 @@ pub struct Conn {
     pub endpoint: Endpoint,
     /// Remote `$HOME`.
     pub home: String,
+    /// Speed up cargo with what the remote has (`fast = true`).
+    pub fast: bool,
     control_path: PathBuf,
 }
 
@@ -64,8 +66,9 @@ impl Remote {
     /// Connect using the cached endpoint, falling back to a full `takeoff`.
     pub fn connect(&self) -> Result<Conn> {
         if let Some(state) = self.load_state() {
-            let conn = Conn::new(state.endpoint, state.home)?;
+            let mut conn = Conn::new(state.endpoint, state.home)?;
             if conn.master_alive() || conn.query_home().is_ok() {
+                conn.fast = self.config.common.fast;
                 return Ok(conn);
             }
         }
@@ -127,6 +130,7 @@ impl Remote {
             home: conn.home.clone(),
         };
         fs::write(&self.state_file, serde_json::to_vec_pretty(&state)?)?;
+        conn.fast = common.fast;
         Ok(conn)
     }
 
@@ -198,6 +202,7 @@ impl Conn {
         Ok(Self {
             endpoint,
             home,
+            fast: false,
             control_path: dir.join("%C"),
         })
     }

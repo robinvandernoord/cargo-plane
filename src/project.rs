@@ -10,11 +10,11 @@ use std::time::SystemTime;
 use anyhow::{Context, Result, bail};
 
 use crate::artifacts::{self, Artifact, Message};
-use crate::cargo_args;
 use crate::output::{replace, rewrite_stream};
 use crate::remote::{Conn, env_prelude};
 use crate::ui;
 use crate::util::{self, shell_join, shell_quote};
+use crate::{cargo_args, fast};
 
 /// What isn't synced: version control, build output, what git ignores.
 const SYNC_FILTERS: &[&str] = &[
@@ -449,8 +449,15 @@ impl Project {
 
         let mut script = env_prelude(conn.prelude(), &env)?;
         script += &format!("cd {} || exit 1\n", shell_quote(&self.remote_cwd()));
+        let mut command = format!("{} {}", shell_quote(program), shell_join(args));
         if program == "cargo" {
             script += &add_missing_component(args);
+            if conn.fast {
+                let debug = !env.contains_key("CARGO_PROFILE_DEV_DEBUG")
+                    && !fast::project_sets_debug(&self.local_root);
+                script += &fast::script(cargo_args::toolchain(args), debug);
+                command = fast::command(program, args);
+            }
         }
         // `setsid` puts cargo in its own process group, so the watcher can stop
         // cargo and everything it spawned once our stdin closes (the local
@@ -459,11 +466,7 @@ impl Project {
         // Background jobs get /dev/null as stdin, so hand the watcher ours via fd 3.
         script += "exec 3<&0\n";
         script += "s=; command -v setsid >/dev/null 2>&1 && s=setsid\n";
-        script += &format!(
-            "$s {} {} </dev/null &\n",
-            shell_quote(program),
-            shell_join(args)
-        );
+        script += &format!("$s {command} </dev/null &\n");
         script += "pid=$!\n";
         script += "$s sh -c 'cat >/dev/null; kill -TERM -$1 || kill -TERM $1' sh $pid <&3 >/dev/null 2>&1 &\n";
         script += "w=$!\n";
